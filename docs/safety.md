@@ -60,7 +60,8 @@ Example (`examples/unsafe_sequence.json`): `shoulder_yaw → 0.7`, then `→ -0.
 
 ## Secrets
 
-- The key is read from `GEMINI_API_KEY` / `GOOGLE_API_KEY` or a git-ignored `.env`.
-- Error messages pass through `redact()`, which strips the configured key and anything shaped like a Google API key.
+- Keys are read from `GEMINI_API_KEY` / `GOOGLE_API_KEY` / `OPENAI_API_KEY` or a git-ignored `.env`.
+- Error messages pass through `redact()`, which strips the configured key and anything shaped like a Google (`AIza…`) or OpenAI (`sk-…`) key.
 - Requests are sent with `store=False`.
-- Unit tests remove key variables from the environment and use a mocked client.
+- Unit tests remove key variables from the environment and use mocked clients.
+- Strict structured outputs (OpenAI) and response schemas (Gemini) only steer the model. They are never treated as validation.

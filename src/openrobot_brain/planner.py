@@ -1,6 +1,6 @@
-"""Planners: Gemini 4 Argon (runtime AI) and an offline, rule-based demo planner.
+"""Planners: Gemini 4 Argon, OpenAI GPT-6 Astra, and an offline rule-based demo planner.
 
-Both return raw JSON *text*. Turning that text into a plan and deciding
+All return raw JSON *text*. Turning that text into a plan and deciding
 whether it is safe happens elsewhere (``schema.parse_plan_json`` and
 ``safety.validate_plan``), so the model output is always treated as untrusted.
 
@@ -14,6 +14,13 @@ and ai.google.dev docs):
   * Thinking is set with ``generation_config={"thinking_level": ...}``
     (low | medium | high). temperature/top_p/top_k are ignored by Argon, so
     they are not sent.
+
+OpenAI integration notes (verified 2026-10-14 against openai 3.31.0):
+  * ``gpt-6-astra`` via the Responses API (``client.responses.create``).
+  * Structured output uses ``text={"format": {"type": "json_schema",
+    "strict": True, ...}}``; the text is read from ``response.output_text``.
+  * Reasoning is ``reasoning={"effort": ...}`` (low | medium | high | xhigh |
+    max). Astra rejects temperature/top_p, so they are not sent.
 """
 
 from __future__ import annotations
@@ -24,12 +31,17 @@ import re
 from typing import Any, Protocol
 
 from .config import RobotConfig
-from .schema import ActionPlan, gemini_response_schema, parse_plan_json
+from .schema import ActionPlan, gemini_response_schema, openai_response_schema, parse_plan_json
 
 DEFAULT_MODEL = "gemini-4-argon"
 THINKING_LEVELS = ("low", "medium", "high")
-MAX_TASK_CHARS = 500
 KEY_ENV_VARS = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+
+OPENAI_DEFAULT_MODEL = "gpt-6-astra"
+OPENAI_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+PROVIDERS = ("gemini", "openai")
+MAX_TASK_CHARS = 500
 
 
 class PlannerError(RuntimeError):
@@ -59,8 +71,9 @@ def redact(text: str, secrets: list[str | None]) -> str:
     for s in secrets:
         if s and len(s) >= 6:
             text = text.replace(s, "***")
-    # Also mask anything shaped like a Google API key that slipped through.
-    return re.sub(r"AIza[0-9A-Za-z_\-]{20,}", "***", text)
+    # Also mask anything shaped like a Google or OpenAI API key that slipped through.
+    text = re.sub(r"AIza[0-9A-Za-z_\-]{20,}", "***", text)
+    return re.sub(r"sk-[0-9A-Za-z_\-]{16,}", "***", text)
 
 
 def build_system_instruction(robot: RobotConfig) -> str:
@@ -178,6 +191,103 @@ class GeminiPlanner:
         if not text:
             raise PlannerError("Gemini returned no text output")
         return text
+
+
+class OpenAIPlanner:
+    name = "openai"
+
+    def __init__(self, robot: RobotConfig, model: str | None = None, api_key: str | None = None,
+                 thinking_level: str = "low", client: Any | None = None, timeout_s: float = 120.0,
+                 max_retries: int = 1):
+        if thinking_level not in OPENAI_EFFORTS:
+            raise PlannerError(f"reasoning effort must be one of {OPENAI_EFFORTS}")
+        self.robot = robot
+        self.model = model or os.environ.get("OPENAI_MODEL") or OPENAI_DEFAULT_MODEL
+        self.thinking_level = thinking_level
+        self._api_key = api_key or os.environ.get("OPENAI_API_KEY") or None
+
+        if client is not None:
+            self._client = client
+        else:
+            if not self._api_key:
+                raise MissingCredentialsError(
+                    "no OpenAI API key found. Set OPENAI_API_KEY in your environment or .env file, "
+                    "or run with --offline for the rule-based demo planner."
+                )
+            from openai import OpenAI  # lazy import
+
+            # Default SDK retries back off for a long time on 429; keep it short.
+            self._client = OpenAI(api_key=self._api_key, max_retries=max_retries, timeout=timeout_s)
+
+    def request_kwargs(self, task: str) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "instructions": build_system_instruction(self.robot),
+            "input": task,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "action_plan",
+                    "strict": True,
+                    "schema": openai_response_schema(self.robot.joint_names),
+                }
+            },
+            "reasoning": {"effort": self.thinking_level},
+            "store": False,
+        }
+
+    def plan_text(self, task: str) -> str:
+        task = _check_task(task)
+        try:
+            response = self._client.responses.create(**self.request_kwargs(task))
+        except Exception as exc:
+            msg = redact(f"{type(exc).__name__}: {exc}", [self._api_key])
+            if len(msg) > 800:
+                msg = msg[:800] + " ..."
+            low = msg.lower()
+            hint = ""
+            if "insufficient_quota" in low or "billing" in low:
+                hint = ("\nYour OpenAI account has no API credit. The API is billed separately from a ChatGPT "
+                        "subscription: add credit at platform.openai.com → Settings → Billing.")
+            elif "429" in msg or "rate limit" in low:
+                hint = "\nRate limited (HTTP 429). Wait a minute and retry."
+            elif "connection" in low or "timeout" in low or "timed out" in low:
+                hint = "\nCould not reach the OpenAI API (network, proxy or firewall). Nothing was planned."
+            elif "404" in msg or "does not exist" in low or "model_not_found" in low:
+                hint = (f"\nModel {self.model!r} is not available to this API key/organization. "
+                        "Check that your org has access and is verified if required. "
+                        "The model is not substituted automatically.")
+            elif "401" in msg or "invalid_api_key" in low or "incorrect api key" in low:
+                hint = "\nThe API key was rejected. Copy it again from platform.openai.com/api-keys."
+            raise PlannerError(f"OpenAI request failed: {msg}{hint}") from None
+        if getattr(response, "status", "completed") == "incomplete":
+            reason = getattr(getattr(response, "incomplete_details", None), "reason", "unknown")
+            raise PlannerError(f"OpenAI response was incomplete ({reason}); nothing was planned")
+        text = getattr(response, "output_text", None)
+        if not text:
+            raise PlannerError("OpenAI returned no text output (the model may have refused)")
+        return text
+
+
+def default_provider() -> str:
+    """ORB_PROVIDER if set, otherwise whichever key is present (Gemini first)."""
+    env = (os.environ.get("ORB_PROVIDER") or "").strip().lower()
+    if env:
+        if env not in PROVIDERS:
+            raise PlannerError(f"ORB_PROVIDER must be one of {PROVIDERS}, got {env!r}")
+        return env
+    if not any(os.environ.get(v) for v in KEY_ENV_VARS) and os.environ.get("OPENAI_API_KEY"):
+        return "openai"
+    return "gemini"
+
+
+def make_planner(provider: str, robot: RobotConfig, model: str | None = None,
+                 thinking_level: str = "low") -> GeminiPlanner | OpenAIPlanner:
+    if provider == "gemini":
+        return GeminiPlanner(robot, model=model, thinking_level=thinking_level)
+    if provider == "openai":
+        return OpenAIPlanner(robot, model=model, thinking_level=thinking_level)
+    raise PlannerError(f"unknown provider {provider!r}; choose from {PROVIDERS}")
 
 
 # --------------------------------------------------------------------------

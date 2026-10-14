@@ -1,6 +1,7 @@
 """Command-line interface.
 
-    orb plan "wave hello"              # Gemini plan, dry run (default)
+    orb plan "wave hello"              # AI plan, dry run (default)
+    orb plan "wave" --provider openai  # GPT-6 Astra instead of Gemini 4 Argon
     orb plan "wave" --offline          # rule-based demo planner, no API key
     orb plan "wave" --offline --execute --headless
     orb validate plan.json [--execute]
@@ -19,7 +20,9 @@ from typing import Callable, Sequence, TextIO
 
 from . import __version__
 from .config import DEFAULT_ROBOT, RobotConfig
-from .planner import OFFLINE_PLANS, THINKING_LEVELS, GeminiPlanner, OfflinePlanner, Planner, PlannerError
+from .planner import (
+    OFFLINE_PLANS, OPENAI_EFFORTS, PROVIDERS, OfflinePlanner, Planner, PlannerError, default_provider, make_planner,
+)
 from .safety import SafetyError, ValidatedPlan, validate_plan
 from .schema import PlanParseError, parse_plan_json
 
@@ -87,7 +90,8 @@ def run_pipeline(plan_text: str, *, robot: RobotConfig = DEFAULT_ROBOT, execute:
 def _make_planner(args) -> Planner:
     if args.offline:
         return OfflinePlanner()
-    return GeminiPlanner(DEFAULT_ROBOT, model=args.model, thinking_level=args.thinking)
+    provider = args.provider or default_provider()
+    return make_planner(provider, DEFAULT_ROBOT, model=args.model, thinking_level=args.thinking)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -102,8 +106,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("plan", help="plan a natural-language task")
     sp.add_argument("task")
     sp.add_argument("--offline", action="store_true", help="use the rule-based demo planner (no API key)")
-    sp.add_argument("--model", default=None, help="Gemini model ID (default: $GEMINI_MODEL or gemini-4-argon)")
-    sp.add_argument("--thinking", choices=THINKING_LEVELS, default="low")
+    sp.add_argument("--provider", choices=PROVIDERS, default=None,
+                    help="AI planner: gemini (Gemini 4 Argon) or openai (GPT-6 Astra). "
+                         "Default: $ORB_PROVIDER, else whichever API key is set")
+    sp.add_argument("--model", default=None,
+                    help="override model ID (defaults: gemini-4-argon / gpt-6-astra, or $GEMINI_MODEL / $OPENAI_MODEL)")
+    sp.add_argument("--thinking", choices=OPENAI_EFFORTS, default="low",
+                    help="reasoning effort; gemini accepts low/medium/high, openai also xhigh/max")
     sp.add_argument("--save", type=Path, help="write the raw plan JSON to this file")
     add_exec_flags(sp)
 
@@ -151,14 +160,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     # plan
     try:
         planner = _make_planner(args)
-        label = "offline demo planner (rule-based, no AI)" if args.offline else f"Gemini model {planner.model}"
+        vendor = {"gemini": "Gemini", "openai": "OpenAI"}.get(planner.name, planner.name)
+        label = "offline demo planner (rule-based, no AI)" if args.offline else f"{vendor} model {planner.model}"
         print(f"Planning with {label}...")
         if not args.offline:
-            print(f"Waiting for Gemini (thinking={args.thinking}; usually 10-60 s, Ctrl+C to cancel)...", flush=True)
+            print(f"Waiting for {vendor} (effort={args.thinking}; usually 10-60 s, Ctrl+C to cancel)...", flush=True)
         t0 = time.monotonic()
         text = planner.plan_text(args.task)
         if not args.offline:
-            print(f"Gemini replied in {time.monotonic() - t0:.1f} s.\n")
+            print(f"{vendor} replied in {time.monotonic() - t0:.1f} s.\n")
     except PlannerError as exc:
         print(f"Planner error: {exc}")
         return EXIT_PLANNER

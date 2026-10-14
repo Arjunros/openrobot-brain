@@ -85,6 +85,22 @@ def parse_plan_json(text: str) -> ActionPlan:
         raise PlanParseError(f"schema violation: {problems}") from exc
 
 
+def openai_response_schema(joint_names: tuple[str, ...]) -> dict[str, Any]:
+    """Same shape for OpenAI strict structured outputs.
+
+    Strict mode supports a JSON-schema subset, so array-size keywords are
+    dropped here; the local schema and safety validator still enforce them.
+    """
+    def strip(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {k: strip(v) for k, v in node.items() if k not in ("minItems", "maxItems")}
+        if isinstance(node, list):
+            return [strip(v) for v in node]
+        return node
+
+    return strip(gemini_response_schema(joint_names))
+
+
 def gemini_response_schema(joint_names: tuple[str, ...]) -> dict[str, Any]:
     """JSON schema sent to Gemini's structured-output mode.
 

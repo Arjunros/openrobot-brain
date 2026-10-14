@@ -18,9 +18,11 @@ Each stage only accepts the previous stage's output type. `ValidatedPlan` can on
 
 ## Planners
 
-Both planners implement `plan_text(task) -> str`, so both go through the same parser and validator.
+All planners implement `plan_text(task) -> str`, so they all go through the same parser and validator.
 
 - **`GeminiPlanner`** — `google-genai` ≥ 2.3, Interactions API (`client.interactions.create`). Sends a system instruction with joint names, ranges, home pose and every safety limit; requests structured JSON via `response_format` with a schema whose joint names are an enum; `thinking_level` low/medium/high; `store=False`. The client is injectable, which is how tests mock it.
+- **`OpenAIPlanner`** — `openai` SDK, Responses API (`client.responses.create`) with `gpt-6-astra`. Same system instruction as Gemini, sent as `instructions`; strict structured output via `text.format` (`json_schema`, `strict: true`). Strict mode accepts only a JSON-schema subset, so `openai_response_schema` drops array-size keywords; local validation still enforces them. `reasoning.effort` low…max; `store=False`; SDK retries capped at 1 so quota errors show up quickly. Incomplete responses are treated as failures.
+- **Provider selection** — `make_planner(provider, ...)`; `--provider` > `ORB_PROVIDER` > whichever key is set (Gemini first).
 - **`OfflinePlanner`** — keyword lookup over a few hand-written plans. It is not an AI planner; it exists so the demo and CI work without a key. One entry (`unsafe demo`) is deliberately unsafe to show rejection.
 
 ## Schema

@@ -14,7 +14,7 @@ def robot():
 @pytest.fixture(autouse=True)
 def no_real_keys(monkeypatch):
     """Unit tests must never see a real API key."""
-    for var in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_MODEL"):
+    for var in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_MODEL", "OPENAI_API_KEY", "OPENAI_MODEL", "ORB_PROVIDER"):
         monkeypatch.delenv(var, raising=False)
 
 

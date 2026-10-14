@@ -5,13 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "openrobot-brain"
 version = "0.1.0"
-description = "Language-to-motion planning for a simulated robot arm: Gemini plans, local code validates, MuJoCo executes."
+description = "Language-to-motion planning for a simulated robot arm: Gemini 4 Argon or GPT-6 Astra plans, local code validates, MuJoCo executes."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 authors = [{ name = "Arjun" }]
 dependencies = [
     "google-genai>=2.3.0",
+    "openai>=1.66",
     "mujoco>=3.2",
     "pydantic>=2.6,<3",
     "python-dotenv>=1.0",
