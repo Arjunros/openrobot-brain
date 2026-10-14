@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Callable, Sequence, TextIO
 
@@ -152,9 +153,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         planner = _make_planner(args)
         label = "offline demo planner (rule-based, no AI)" if args.offline else f"Gemini model {planner.model}"
         print(f"Planning with {label}...")
+        if not args.offline:
+            print(f"Waiting for Gemini (thinking={args.thinking}; usually 10-60 s, Ctrl+C to cancel)...", flush=True)
+        t0 = time.monotonic()
         text = planner.plan_text(args.task)
+        if not args.offline:
+            print(f"Gemini replied in {time.monotonic() - t0:.1f} s.\n")
     except PlannerError as exc:
         print(f"Planner error: {exc}")
+        return EXIT_PLANNER
+    except KeyboardInterrupt:
+        print("\nCancelled. Nothing was planned or executed.")
         return EXIT_PLANNER
     if args.save:
         args.save.write_text(text, encoding="utf-8")

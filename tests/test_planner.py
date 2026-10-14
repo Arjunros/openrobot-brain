@@ -74,6 +74,21 @@ def test_api_errors_are_wrapped_and_key_redacted(robot):
     assert "not substituted" in str(exc.value)
 
 
+@pytest.mark.parametrize("err,expected", [
+    ("429 RESOURCE_EXHAUSTED. quota_metric: generate_content_free_tier_requests, limit: 0", "zero quota"),
+    ("429 Too Many Requests", "free tier"),
+])
+def test_quota_errors_explain_billing(robot, err, expected):
+    p = GeminiPlanner(robot, client=fake_client(exc=RuntimeError(err)))
+    with pytest.raises(PlannerError, match=expected):
+        p.plan_text("wave")
+
+
+def test_real_client_is_built_with_limited_retries(robot):
+    p = GeminiPlanner(robot, api_key="test-key-not-real-123456", max_retries=1)
+    assert p._client is not None  # constructing must not touch the network
+
+
 def test_redact_masks_key_shaped_strings():
     assert "AIza" not in redact("bad key AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ012", [])
 

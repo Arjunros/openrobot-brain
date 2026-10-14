@@ -103,7 +103,8 @@ class GeminiPlanner:
     name = "gemini"
 
     def __init__(self, robot: RobotConfig, model: str | None = None, api_key: str | None = None,
-                 thinking_level: str = "low", client: Any | None = None, timeout_s: float = 120.0):
+                 thinking_level: str = "low", client: Any | None = None, timeout_s: float = 120.0,
+                 max_retries: int = 1):
         if thinking_level not in THINKING_LEVELS:
             raise PlannerError(f"thinking_level must be one of {THINKING_LEVELS}")
         self.robot = robot
@@ -121,8 +122,16 @@ class GeminiPlanner:
                     "or run with --offline for the rule-based demo planner."
                 )
             from google import genai  # imported lazily so offline mode needs no SDK init
+            from google.genai import types
 
-            self._client = genai.Client(api_key=self._api_key)
+            # The SDK retries 429/5xx with back-off by default, which looks like a hang.
+            # Keep it to one quick retry so quota errors surface in seconds.
+            self._client = genai.Client(
+                api_key=self._api_key,
+                http_options=types.HttpOptions(
+                    retry_options=types.HttpRetryOptions(attempts=max_retries, initial_delay=1.0, max_delay=4.0)
+                ),
+            )
 
     def request_kwargs(self, task: str) -> dict[str, Any]:
         return {
@@ -144,17 +153,26 @@ class GeminiPlanner:
             interaction = self._client.interactions.create(**self.request_kwargs(task), timeout=self.timeout_s)
         except Exception as exc:
             msg = redact(f"{type(exc).__name__}: {exc}", [self._api_key])
+            if len(msg) > 800:
+                msg = msg[:800] + " ..."
             hint = ""
             low = msg.lower()
-            if "connection" in low or "timeout" in low or "timed out" in low:
+            if "429" in msg or "quota" in low or "resource_exhausted" in low or "too many requests" in low:
+                if "limit: 0" in low or "free_tier" in low or "free tier" in low:
+                    hint = ("\nYour key's project has zero quota for this model. Gemini 4 Argon is paid-tier only: "
+                            "enable billing for the project in Google AI Studio (Dashboard → Billing), "
+                            "or create the key in a project that already has billing.")
+                else:
+                    hint = ("\nRate limit or quota exceeded (HTTP 429). If this happens on the very first request, "
+                            "the key's project is most likely on the free tier, which has no Argon quota; enable "
+                            "billing in Google AI Studio. Otherwise wait a minute and retry.")
+            elif "connection" in low or "timeout" in low or "timed out" in low:
                 hint = "\nCould not reach the Gemini API (network, proxy or firewall). Nothing was planned."
             elif "404" in msg or "not found" in low:
                 hint = (f"\nModel {self.model!r} was not found for this key. Gemini 4 Argon is paid-tier only; "
                         "check billing on your AI Studio project. The model is not substituted automatically.")
             elif "permission" in low or "403" in msg or "401" in msg or "api key" in low:
                 hint = "\nThe API key was rejected or lacks access."
-            elif "429" in msg or "quota" in low:
-                hint = "\nRate limit or quota exceeded."
             raise PlannerError(f"Gemini request failed: {msg}{hint}") from None
         text = getattr(interaction, "output_text", None)
         if not text:
