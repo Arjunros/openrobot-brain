@@ -1,4 +1,4 @@
-# OpenRobot-Brain
+﻿# OpenRobot-Brain
 
 **GPT-6 Astra looks at a table through a camera, plans pick-and-place for a Franka Panda, and local code checks every motion before the robot moves.**
 
@@ -38,7 +38,7 @@ camera ─▶ GPT-6 Astra ─▶ pixels → metres ─▶ skills → joint traje
 Requires Python 3.11+.
 
 ```powershell
-git clone https://github.com/<your-username>/openrobot-brain.git
+git clone https://github.com/Arjunros/openrobot-brain.git
 cd openrobot-brain
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
