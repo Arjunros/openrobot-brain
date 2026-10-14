@@ -1,46 +1,33 @@
-"""Planners: Gemini 4 Argon, OpenAI GPT-6 Astra, and an offline rule-based demo planner.
+"""Planners for the agent loop.
 
-All return raw JSON *text*. Turning that text into a plan and deciding
-whether it is safe happens elsewhere (``schema.parse_plan_json`` and
-``safety.validate_plan``), so the model output is always treated as untrusted.
+* ``AstraPlanner`` -- OpenAI GPT-6 Astra via the Responses API (the only AI planner).
+* ``OfflinePlanner`` -- deterministic scripted policy for demos/CI. Not AI.
 
-Gemini integration notes (verified 2026-10-14 against google-genai 2.30.1
-and ai.google.dev docs):
-  * ``gemini-4-argon`` is served through the Interactions API
-    (``client.interactions.create``), paid tier only.
-  * Structured output uses ``response_format={"type": "text",
-    "mime_type": "application/json", "schema": ...}``; the text is read from
-    ``interaction.output_text``.
-  * Thinking is set with ``generation_config={"thinking_level": ...}``
-    (low | medium | high). temperature/top_p/top_k are ignored by Argon, so
-    they are not sent.
+Both return raw JSON text for one round. Parsing, perception and safety checks
+happen elsewhere; model output is always untrusted.
 
-OpenAI integration notes (verified 2026-10-14 against openai 3.31.0):
-  * ``gpt-6-astra`` via the Responses API (``client.responses.create``).
-  * Structured output uses ``text={"format": {"type": "json_schema",
-    "strict": True, ...}}``; the text is read from ``response.output_text``.
-  * Reasoning is ``reasoning={"effort": ...}`` (low | medium | high | xhigh |
-    max). Astra rejects temperature/top_p, so they are not sent.
+OpenAI integration (verified 2026-10-14 against openai 3.31.0):
+  * ``client.responses.create(model="gpt-6-astra", instructions=..., input=[...])``
+  * image input: ``{"type": "input_image", "image_url": "data:image/png;base64,...", "detail": "high"}``
+  * strict structured output: ``text={"format": {"type": "json_schema", "strict": True, ...}}``
+  * ``reasoning={"effort": low|medium|high|xhigh|max}``; temperature/top_p are rejected by Astra.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .config import RobotConfig
-from .schema import ActionPlan, gemini_response_schema, openai_response_schema, parse_plan_json
+from .schema import response_json_schema
+from .world import WorldState
 
-DEFAULT_MODEL = "gemini-4-argon"
-THINKING_LEVELS = ("low", "medium", "high")
-KEY_ENV_VARS = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
-
-OPENAI_DEFAULT_MODEL = "gpt-6-astra"
-OPENAI_EFFORTS = ("low", "medium", "high", "xhigh", "max")
-
-PROVIDERS = ("gemini", "openai")
+DEFAULT_MODEL = "gpt-6-astra"
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 MAX_TASK_CHARS = 500
 
 
@@ -52,13 +39,25 @@ class MissingCredentialsError(PlannerError):
     pass
 
 
+@dataclass
+class RoundInput:
+    task: str
+    round: int
+    max_rounds: int
+    prompt: str                    # full text the AI sees this round
+    image_png: bytes | None        # overhead camera image (vision mode)
+    truth: WorldState              # ground truth: ONLY the offline scripted planner may use it
+    history: list[dict[str, Any]] = field(default_factory=list)
+
+
 class Planner(Protocol):
     name: str
+    model: str
 
-    def plan_text(self, task: str) -> str: ...
+    def respond(self, rin: RoundInput) -> str: ...
 
 
-def _check_task(task: str) -> str:
+def check_task(task: str) -> str:
     task = (task or "").strip()
     if not task:
         raise PlannerError("task is empty")
@@ -71,294 +70,195 @@ def redact(text: str, secrets: list[str | None]) -> str:
     for s in secrets:
         if s and len(s) >= 6:
             text = text.replace(s, "***")
-    # Also mask anything shaped like a Google or OpenAI API key that slipped through.
-    text = re.sub(r"AIza[0-9A-Za-z_\-]{20,}", "***", text)
     return re.sub(r"sk-[0-9A-Za-z_\-]{16,}", "***", text)
 
 
-def build_system_instruction(robot: RobotConfig) -> str:
-    lim = robot.safety
-    joints = "\n".join(
-        f"  - {n}: [{l.lower}, {l.upper}] rad (home {robot.home_pose[n]})"
-        for n, l in robot.joint_limits.items()
+def system_instructions(robot: RobotConfig, vision: bool, image_w: int, image_h: int) -> str:
+    ws, lim, c = robot.workspace, robot.safety, robot.cube_size_m
+    perception = (
+        f"""PERCEPTION (vision mode)
+Each round you get one top-down image ({image_w}x{image_h} px) from a fixed overhead camera.
+Pixel origin is the top-left corner; u grows to the right, v grows downward.
+In the image, UP is +x (away from the robot) and RIGHT is -y (the robot's right).
+List every object you can see in `observations`:
+  id: short lowercase id you choose (e.g. "red_cube"); keep ids stable across rounds
+  label: what it is, including colour (e.g. "red cube")
+  u, v: pixel centre of the object's visible TOP face, as precisely as you can
+  on_top_of: id of the object it rests on, or "" if it is on the table
+The robot converts your pixel coordinates to metres itself. Refer to objects by id in actions.
+The arm is parked out of view while the photo is taken; an object held in the gripper is not visible."""
+        if vision else
+        """PERCEPTION (state mode)
+Each round you get the list of objects with ids and positions in metres. Leave `observations` empty."""
     )
-    return f"""You are the motion planner for a SIMULATED 4-joint robot arm ({robot.name}) in MuJoCo.
-Convert the user's instruction into a short joint-space action plan.
+    return f"""You control a SIMULATED Franka Emika Panda arm with a parallel gripper in MuJoCo, working on a
+tabletop with {c * 100:.0f} cm cubes. You plan high-level actions; a separate safety system turns them
+into motions, checks every one, and rejects the whole round if anything is unsafe.
 
-Robot joints (name: allowed range, home position):
-{joints}
+WORLD FRAME (metres): robot base at the origin, +x away from the robot, +y to the robot's left,
+table surface at z = 0. Reachable area: x {ws.x[0]}..{ws.x[1]}, y {ws.y[0]}..{ws.y[1]}.
 
-Conventions: shoulder_yaw rotates the arm left (+) / right (-) about the vertical axis.
-shoulder_pitch, elbow_pitch and wrist_pitch tilt forward (+) / backward (-).
-The arm has no gripper, no camera and no inverse kinematics. It can only move joints.
-The arm starts at the home position unless told otherwise.
+{perception}
 
-Allowed actions (nothing else):
-  - move_joints: targets = list of {{joint, position_rad}}, duration_s
-  - wait: duration_s
+ACTIONS (the only ones that exist):
+  pick {{object}}            grasp an object from above. Gripper must be empty; nothing may be on top of it.
+  place_on {{object}}        put the held object on top of another object (stacks up to {lim.max_stack_height} high).
+  place_at {{x, y}}          put the held object on the table at (x, y); needs {lim.place_clearance_m} m clear of other objects.
+  move_to {{x, y, z}}        move the gripper tip to a point (e.g. to point at something). z >= {ws.tcp_z_min}.
+  go_home {{}}               return to the parked camera pose.
+  wait {{duration_s}}        pause, at most {lim.max_wait_s} s.
+At most {lim.max_actions_per_round} actions per round. After each round the arm parks, you get feedback
+on what happened, and (in vision mode) a fresh image.
 
-Hard limits that a separate validator will enforce (plans that break any are rejected):
-  - at most {lim.max_actions} actions
-  - each joint may change by at most {lim.max_step_delta_rad} rad per move_joints, measured from its position after the previous action
-  - joint speed (change / duration_s) at most {lim.max_joint_velocity_rad_s} rad/s
-  - move_joints duration_s between {lim.min_move_duration_s} and {lim.max_move_duration_s}
-  - wait duration_s greater than 0 and at most {lim.max_wait_s}
-  - total duration at most {lim.max_total_duration_s} s
-Split large motions into several smaller moves. Joints not listed in a move keep their position.
+STATUS
+  "act"         you are sending actions now.
+  "done"        the task is complete AS SHOWN BY THE CURRENT OBSERVATION. Send no actions.
+  "infeasible"  the task cannot be done with this robot (no such object, needs abilities it lacks,
+                outside reach...). Explain why in `message`. Send no actions.
 
-If the instruction needs a capability this arm does not have (grasping, seeing, walking, speech,
-anything outside the simulator), return a single wait of 0.5 s and explain in `summary` that it
-cannot be done. Never claim the arm did something it cannot do.
-Return only the JSON object."""
-
-
-class GeminiPlanner:
-    name = "gemini"
-
-    def __init__(self, robot: RobotConfig, model: str | None = None, api_key: str | None = None,
-                 thinking_level: str = "low", client: Any | None = None, timeout_s: float = 120.0,
-                 max_retries: int = 1):
-        if thinking_level not in THINKING_LEVELS:
-            raise PlannerError(f"thinking_level must be one of {THINKING_LEVELS}")
-        self.robot = robot
-        self.model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
-        self.thinking_level = thinking_level
-        self.timeout_s = timeout_s
-        self._api_key = api_key or next((os.environ[v] for v in KEY_ENV_VARS if os.environ.get(v)), None)
-
-        if client is not None:
-            self._client = client
-        else:
-            if not self._api_key:
-                raise MissingCredentialsError(
-                    "no Gemini API key found. Set GEMINI_API_KEY in your environment or .env file, "
-                    "or run with --offline for the rule-based demo planner."
-                )
-            from google import genai  # imported lazily so offline mode needs no SDK init
-            from google.genai import types
-
-            # The SDK retries 429/5xx with back-off by default, which looks like a hang.
-            # Keep it to one quick retry so quota errors surface in seconds.
-            self._client = genai.Client(
-                api_key=self._api_key,
-                http_options=types.HttpOptions(
-                    retry_options=types.HttpRetryOptions(attempts=max_retries, initial_delay=1.0, max_delay=4.0)
-                ),
-            )
-
-    def request_kwargs(self, task: str) -> dict[str, Any]:
-        return {
-            "model": self.model,
-            "system_instruction": build_system_instruction(self.robot),
-            "input": task,
-            "response_format": {
-                "type": "text",
-                "mime_type": "application/json",
-                "schema": gemini_response_schema(self.robot.joint_names),
-            },
-            "generation_config": {"thinking_level": self.thinking_level},
-            "store": False,
-        }
-
-    def plan_text(self, task: str) -> str:
-        task = _check_task(task)
-        try:
-            interaction = self._client.interactions.create(**self.request_kwargs(task), timeout=self.timeout_s)
-        except Exception as exc:
-            msg = redact(f"{type(exc).__name__}: {exc}", [self._api_key])
-            if len(msg) > 800:
-                msg = msg[:800] + " ..."
-            hint = ""
-            low = msg.lower()
-            if "429" in msg or "quota" in low or "resource_exhausted" in low or "too many requests" in low:
-                if "limit: 0" in low or "free_tier" in low or "free tier" in low:
-                    hint = ("\nYour key's project has zero quota for this model. Gemini 4 Argon is paid-tier only: "
-                            "enable billing for the project in Google AI Studio (Dashboard → Billing), "
-                            "or create the key in a project that already has billing.")
-                else:
-                    hint = ("\nRate limit or quota exceeded (HTTP 429). If this happens on the very first request, "
-                            "the key's project is most likely on the free tier, which has no Argon quota; enable "
-                            "billing in Google AI Studio. Otherwise wait a minute and retry.")
-            elif "connection" in low or "timeout" in low or "timed out" in low:
-                hint = "\nCould not reach the Gemini API (network, proxy or firewall). Nothing was planned."
-            elif "404" in msg or "not found" in low:
-                hint = (f"\nModel {self.model!r} was not found for this key. Gemini 4 Argon is paid-tier only; "
-                        "check billing on your AI Studio project. The model is not substituted automatically.")
-            elif "permission" in low or "403" in msg or "401" in msg or "api key" in low:
-                hint = "\nThe API key was rejected or lacks access."
-            raise PlannerError(f"Gemini request failed: {msg}{hint}") from None
-        text = getattr(interaction, "output_text", None)
-        if not text:
-            raise PlannerError("Gemini returned no text output")
-        return text
+RULES
+- Prefer a few actions per round, then check the result in the next observation.
+- If feedback says a grasp missed or the safety system rejected your plan, adapt; don't repeat the same thing.
+- Never claim success you cannot see. `message` is one or two short sentences for the human operator.
+"""
 
 
-class OpenAIPlanner:
+class AstraPlanner:
     name = "openai"
 
-    def __init__(self, robot: RobotConfig, model: str | None = None, api_key: str | None = None,
-                 thinking_level: str = "low", client: Any | None = None, timeout_s: float = 120.0,
-                 max_retries: int = 1):
-        if thinking_level not in OPENAI_EFFORTS:
-            raise PlannerError(f"reasoning effort must be one of {OPENAI_EFFORTS}")
+    def __init__(self, robot: RobotConfig, *, vision: bool, image_size: tuple[int, int] = (640, 480),
+                 model: str | None = None, api_key: str | None = None, effort: str = "low",
+                 client: Any | None = None, timeout_s: float = 180.0, max_retries: int = 1,
+                 image_detail: str = "high"):
+        if effort not in EFFORTS:
+            raise PlannerError(f"reasoning effort must be one of {EFFORTS}")
         self.robot = robot
-        self.model = model or os.environ.get("OPENAI_MODEL") or OPENAI_DEFAULT_MODEL
-        self.thinking_level = thinking_level
+        self.vision = vision
+        self.image_size = image_size
+        self.model = model or os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL
+        self.effort = effort
+        self.image_detail = image_detail
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY") or None
-
         if client is not None:
             self._client = client
         else:
             if not self._api_key:
                 raise MissingCredentialsError(
                     "no OpenAI API key found. Set OPENAI_API_KEY in your environment or .env file, "
-                    "or run with --offline for the rule-based demo planner."
-                )
-            from openai import OpenAI  # lazy import
-
-            # Default SDK retries back off for a long time on 429; keep it short.
+                    "or run with --offline for the scripted demo planner.")
+            from openai import OpenAI
             self._client = OpenAI(api_key=self._api_key, max_retries=max_retries, timeout=timeout_s)
 
-    def request_kwargs(self, task: str) -> dict[str, Any]:
+    def request_kwargs(self, rin: RoundInput) -> dict[str, Any]:
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": rin.prompt}]
+        if self.vision:
+            if not rin.image_png:
+                raise PlannerError("vision mode needs a camera image")
+            b64 = base64.b64encode(rin.image_png).decode("ascii")
+            content.append({"type": "input_image", "image_url": f"data:image/png;base64,{b64}",
+                            "detail": self.image_detail})
         return {
             "model": self.model,
-            "instructions": build_system_instruction(self.robot),
-            "input": task,
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "action_plan",
-                    "strict": True,
-                    "schema": openai_response_schema(self.robot.joint_names),
-                }
-            },
-            "reasoning": {"effort": self.thinking_level},
+            "instructions": system_instructions(self.robot, self.vision, *self.image_size),
+            "input": [{"role": "user", "content": content}],
+            "text": {"format": {"type": "json_schema", "name": "robot_round", "strict": True,
+                                "schema": response_json_schema()}},
+            "reasoning": {"effort": self.effort},
             "store": False,
         }
 
-    def plan_text(self, task: str) -> str:
-        task = _check_task(task)
+    def respond(self, rin: RoundInput) -> str:
         try:
-            response = self._client.responses.create(**self.request_kwargs(task))
+            response = self._client.responses.create(**self.request_kwargs(rin))
+        except PlannerError:
+            raise
         except Exception as exc:
-            msg = redact(f"{type(exc).__name__}: {exc}", [self._api_key])
-            if len(msg) > 800:
-                msg = msg[:800] + " ..."
+            msg = redact(f"{type(exc).__name__}: {exc}", [self._api_key])[:800]
             low = msg.lower()
             hint = ""
             if "insufficient_quota" in low or "billing" in low:
-                hint = ("\nYour OpenAI account has no API credit. The API is billed separately from a ChatGPT "
-                        "subscription: add credit at platform.openai.com → Settings → Billing.")
+                hint = ("\nYour OpenAI account has no API credit. API usage is billed separately from ChatGPT: "
+                        "add credit at platform.openai.com -> Settings -> Billing.")
             elif "429" in msg or "rate limit" in low:
                 hint = "\nRate limited (HTTP 429). Wait a minute and retry."
             elif "connection" in low or "timeout" in low or "timed out" in low:
-                hint = "\nCould not reach the OpenAI API (network, proxy or firewall). Nothing was planned."
-            elif "404" in msg or "does not exist" in low or "model_not_found" in low:
-                hint = (f"\nModel {self.model!r} is not available to this API key/organization. "
-                        "Check that your org has access and is verified if required. "
-                        "The model is not substituted automatically.")
+                hint = "\nCould not reach the OpenAI API (network, proxy or firewall)."
+            elif "404" in msg or "model_not_found" in low or "does not exist" in low:
+                hint = (f"\nModel {self.model!r} is not available to this key/organization. "
+                        "It is not substituted automatically.")
             elif "401" in msg or "invalid_api_key" in low or "incorrect api key" in low:
-                hint = "\nThe API key was rejected. Copy it again from platform.openai.com/api-keys."
+                hint = "\nThe API key was rejected. Create a new one at platform.openai.com/api-keys."
+            elif "image" in low and ("unsupported" in low or "invalid" in low):
+                hint = "\nThe model rejected the image input. Try --no-vision."
             raise PlannerError(f"OpenAI request failed: {msg}{hint}") from None
         if getattr(response, "status", "completed") == "incomplete":
             reason = getattr(getattr(response, "incomplete_details", None), "reason", "unknown")
-            raise PlannerError(f"OpenAI response was incomplete ({reason}); nothing was planned")
+            raise PlannerError(f"OpenAI response was incomplete ({reason})")
         text = getattr(response, "output_text", None)
         if not text:
             raise PlannerError("OpenAI returned no text output (the model may have refused)")
         return text
 
 
-def default_provider() -> str:
-    """ORB_PROVIDER if set, otherwise whichever key is present (Gemini first)."""
-    env = (os.environ.get("ORB_PROVIDER") or "").strip().lower()
-    if env:
-        if env not in PROVIDERS:
-            raise PlannerError(f"ORB_PROVIDER must be one of {PROVIDERS}, got {env!r}")
-        return env
-    if not any(os.environ.get(v) for v in KEY_ENV_VARS) and os.environ.get("OPENAI_API_KEY"):
-        return "openai"
-    return "gemini"
+# ------------------------------------------------------------------------------
+# Offline scripted planner: deterministic, uses simulator ground truth. Not AI.
+# ------------------------------------------------------------------------------
+
+_COLORS = ("red", "green", "blue")
 
 
-def make_planner(provider: str, robot: RobotConfig, model: str | None = None,
-                 thinking_level: str = "low") -> GeminiPlanner | OpenAIPlanner:
-    if provider == "gemini":
-        return GeminiPlanner(robot, model=model, thinking_level=thinking_level)
-    if provider == "openai":
-        return OpenAIPlanner(robot, model=model, thinking_level=thinking_level)
-    raise PlannerError(f"unknown provider {provider!r}; choose from {PROVIDERS}")
+def _cube(color: str) -> str:
+    return f"{color}_cube"
 
 
-# --------------------------------------------------------------------------
-# Offline demo planner: deterministic, no network, no AI.
-# --------------------------------------------------------------------------
-
-def _move(duration: float, **targets: float) -> dict[str, Any]:
-    return {"action": "move_joints", "duration_s": duration,
-            "targets": [{"joint": j, "position_rad": v} for j, v in targets.items()]}
-
-
-def _wait(duration: float) -> dict[str, Any]:
-    return {"action": "wait", "duration_s": duration}
-
-
-OFFLINE_PLANS: dict[str, dict[str, Any]] = {
-    "wave": {
-        "summary": "Raise the forearm and wave by swinging the shoulder yaw.",
-        "actions": [
-            _move(1.0, shoulder_pitch=-0.3, elbow_pitch=-0.8),
-            _move(0.8, shoulder_yaw=0.35),
-            _move(1.0, shoulder_yaw=-0.35),
-            _move(1.0, shoulder_yaw=0.35),
-            _move(0.8, shoulder_yaw=0.0),
-            _move(1.0, shoulder_pitch=0.0, elbow_pitch=0.0),
-        ],
-    },
-    "nod": {
-        "summary": "Nod by tilting the wrist down and up twice.",
-        "actions": [_move(0.8, wrist_pitch=0.6), _move(0.8, wrist_pitch=-0.2),
-                    _move(0.8, wrist_pitch=0.6), _move(0.8, wrist_pitch=0.0)],
-    },
-    "look left": {
-        "summary": "Rotate the arm to the left, pause, and return.",
-        "actions": [_move(1.0, shoulder_yaw=0.8), _move(1.0, shoulder_yaw=1.2), _wait(1.0),
-                    _move(1.5, shoulder_yaw=0.4), _move(1.0, shoulder_yaw=0.0)],
-    },
-    "reach forward": {
-        "summary": "Lean forward in two stages, hold, then return home.",
-        "actions": [_move(1.0, shoulder_pitch=0.5, elbow_pitch=0.4),
-                    _move(1.0, shoulder_pitch=0.9, elbow_pitch=0.7, wrist_pitch=0.3),
-                    _wait(1.0),
-                    _move(1.0, shoulder_pitch=0.4, elbow_pitch=0.3, wrist_pitch=0.0),
-                    _move(1.0, shoulder_pitch=0.0, elbow_pitch=0.0)],
-    },
-    "home": {"summary": "Move every joint to the home position.",
-             "actions": [_move(1.5, shoulder_yaw=0.0, shoulder_pitch=0.0, elbow_pitch=0.0, wrist_pitch=0.0)]},
-    # Deliberately unsafe: each move is in range, but the sequence jumps too far.
-    # Exists to demonstrate that the validator rejects it.
-    "unsafe demo": {
-        "summary": "UNSAFE on purpose: swings shoulder_yaw from +1.2 to -1.2 in one move.",
-        "actions": [_move(1.0, shoulder_yaw=0.6), _move(1.0, shoulder_yaw=1.2), _move(1.0, shoulder_yaw=-1.2)],
-    },
-}
+def _resp(status: str, message: str, actions: list[dict] | None = None) -> str:
+    return json.dumps({"status": status, "message": message, "observations": [], "actions": actions or []})
 
 
 class OfflinePlanner:
-    """Keyword-matched canned plans for demos and CI. Not an AI planner."""
+    """Handles a few demo tasks: 'stack red on blue', 'pick up green', 'build a tower',
+    and 'unsafe demo' (deliberately rejected by the safety validator)."""
 
     name = "offline"
+    model = "scripted"
 
-    def plan_text(self, task: str) -> str:
-        task = _check_task(task).lower()
-        for key in sorted(OFFLINE_PLANS, key=len, reverse=True):
-            if key in task:
-                return json.dumps(OFFLINE_PLANS[key])
-        raise PlannerError(
-            "offline planner only knows these demo tasks: " + ", ".join(repr(k) for k in OFFLINE_PLANS)
-            + ". Use Gemini for free-form instructions."
-        )
+    def respond(self, rin: RoundInput) -> str:
+        task = rin.task.lower()
+        w = rin.truth
+        colors = [c for c in re.findall(r"\b(red|green|blue)\b", task)]
 
+        def on(a: str, b: str) -> bool:
+            pa, pb = w.objects[a].pos, w.objects[b].pos
+            return w.held != a and abs(pa[0] - pb[0]) < 0.02 and abs(pa[1] - pb[1]) < 0.02 and 0.03 < pa[2] - pb[2] < 0.05
 
-def plan(planner: Planner, task: str) -> ActionPlan:
-    return parse_plan_json(planner.plan_text(task))
+        if "unsafe" in task:
+            return _resp("act", "Deliberately unsafe demo: carry the red cube off the table.",
+                         [{"action": "pick", "object": "red_cube"}, {"action": "place_at", "x": 1.2, "y": 0.0}])
+
+        if "tower" in task or "all" in task:
+            order = colors if len(colors) == 3 else ["blue", "red", "green"]
+            for below, above in zip(order, order[1:]):
+                if not on(_cube(above), _cube(below)):
+                    return self._stack(w, _cube(above), _cube(below))
+            return _resp("done", f"Tower built: {' / '.join(reversed(order))}.")
+
+        if len(colors) >= 2 and any(k in task for k in ("stack", " on ", "onto", "put", "place")):
+            a, b = _cube(colors[0]), _cube(colors[1])
+            if on(a, b):
+                return _resp("done", f"The {colors[0]} cube is on the {colors[1]} cube.")
+            return self._stack(w, a, b)
+
+        if len(colors) == 1 and any(k in task for k in ("pick", "grab", "lift")):
+            a = _cube(colors[0])
+            if w.held == a:
+                return _resp("done", f"Holding the {colors[0]} cube.")
+            return _resp("act", f"Picking up the {colors[0]} cube.", [{"action": "pick", "object": a}])
+
+        return _resp("infeasible", "The offline demo planner only knows: 'stack <colour> on <colour>', "
+                                   "'pick up <colour>', 'build a tower', 'unsafe demo'.")
+
+    @staticmethod
+    def _stack(w: WorldState, a: str, b: str) -> str:
+        acts = [] if w.held == a else [{"action": "pick", "object": a}]
+        acts.append({"action": "place_on", "object": b})
+        return _resp("act", f"Stacking {a.replace('_', ' ')} on {b.replace('_', ' ')}.", acts)

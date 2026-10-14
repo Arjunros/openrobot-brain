@@ -4,22 +4,24 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openrobot-brain"
-version = "0.1.0"
-description = "Language-to-motion planning for a simulated robot arm: Gemini 4 Argon or GPT-6 Astra plans, local code validates, MuJoCo executes."
+version = "0.2.0"
+description = "GPT-6 Astra sees a MuJoCo tabletop, plans pick-and-place for a Franka Panda, and local code validates every motion before it runs."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 authors = [{ name = "Arjun" }]
 dependencies = [
-    "google-genai>=2.3.0",
     "openai>=1.66",
     "mujoco>=3.2",
     "pydantic>=2.6,<3",
     "python-dotenv>=1.0",
+    "numpy>=1.26",
+    "pillow>=10.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+video = ["imageio>=2.31", "imageio-ffmpeg>=0.5"]
 
 [project.scripts]
 orb = "openrobot_brain.cli:main"
@@ -28,11 +30,11 @@ orb = "openrobot_brain.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-openrobot_brain = ["simulation/*.xml"]
+openrobot_brain = ["simulation/franka_emika_panda/*.xml", "simulation/franka_emika_panda/*.md", "simulation/franka_emika_panda/LICENSE", "simulation/franka_emika_panda/assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
 markers = [
-    "live: requires a real Gemini API key and network access (skipped by default)",
+    "live: requires a real OpenAI API key and network access (skipped by default)",
 ]

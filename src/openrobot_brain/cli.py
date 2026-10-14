@@ -1,185 +1,166 @@
 """Command-line interface.
 
-    orb plan "wave hello"              # AI plan, dry run (default)
-    orb plan "wave" --provider openai  # GPT-6 Astra instead of Gemini 4 Argon
-    orb plan "wave" --offline          # rule-based demo planner, no API key
-    orb plan "wave" --offline --execute --headless
-    orb validate plan.json [--execute]
+    orb run "stack the red cube on the blue cube"              # GPT-6 Astra + vision, dry run
+    orb run "build a tower" --execute                          # closed loop in the MuJoCo viewer
+    orb run "build a tower" --execute --hold --speed 0.5       # keep window open, half speed (for recording)
+    orb run "stack red on blue" --no-vision --execute          # model gets object positions, no image
+    orb run "build a tower" --execute --headless --record tower.mp4   # captioned video for sharing
+    orb run "build a tower" --offline --execute                # scripted demo, no API key
+    orb snapshot --seed 3                                      # save camera images of a layout
     orb sim-check
-    orb demos
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
-import time
 from pathlib import Path
-from typing import Callable, Sequence, TextIO
+from typing import Sequence
 
 from . import __version__
-from .config import DEFAULT_ROBOT, RobotConfig
-from .planner import (
-    OFFLINE_PLANS, OPENAI_EFFORTS, PROVIDERS, OfflinePlanner, Planner, PlannerError, default_provider, make_planner,
-)
-from .safety import SafetyError, ValidatedPlan, validate_plan
-from .schema import PlanParseError, parse_plan_json
+from .config import PANDA
 
-EXIT_OK, EXIT_REJECTED, EXIT_PLANNER, EXIT_SIM = 0, 2, 3, 4
-
-ExecutorFactory = Callable[[RobotConfig, bool], object]
-
-
-def _default_executor_factory(robot: RobotConfig, headless: bool):
-    from .simulation.executor import MujocoExecutor  # lazy: dry runs never import MuJoCo
-    return MujocoExecutor(robot, headless=headless)
-
-
-def format_plan(vp: ValidatedPlan) -> str:
-    lines = [f"Plan: {vp.plan.summary or '(no summary)'}",
-             f"Actions: {len(vp.steps)}   total duration: {vp.total_duration_s:.1f}s", ""]
-    for step in vp.steps:
-        a = step.action
-        if a.action == "wait":
-            lines.append(f"  [{step.index}] wait {a.duration_s:.2f}s")
-        else:
-            moves = ", ".join(f"{t.joint} {step.start_state[t.joint]:+.2f}→{t.position_rad:+.2f}" for t in a.targets)
-            lines.append(f"  [{step.index}] move_joints {a.duration_s:.2f}s  {moves}")
-    lines.append("")
-    lines.append("Final pose: " + ", ".join(f"{k}={v:+.2f}" for k, v in vp.final_state.items()))
-    return "\n".join(lines)
-
-
-def run_pipeline(plan_text: str, *, robot: RobotConfig = DEFAULT_ROBOT, execute: bool = False,
-                 headless: bool = True, out: TextIO | None = None,
-                 executor_factory: ExecutorFactory = _default_executor_factory) -> int:
-    """Parse → validate → preview → (optionally) execute. Returns an exit code."""
-    out = out or sys.stdout  # resolved at call time so redirection works
-    try:
-        plan = parse_plan_json(plan_text)
-        validated = validate_plan(plan, robot)
-    except (PlanParseError, SafetyError) as exc:
-        print(f"REJECTED — nothing was executed.\n{exc}", file=out)
-        return EXIT_REJECTED
-
-    print("Validated plan (passed schema + safety checks):\n", file=out)
-    print(format_plan(validated), file=out)
-
-    if not execute:
-        print("\nDry run: no simulation started. Add --execute to run this plan in MuJoCo.", file=out)
-        return EXIT_OK
-
-    print(f"\nExecuting in MuJoCo ({'headless' if headless else 'viewer'})...", file=out)
-    try:
-        with executor_factory(robot, headless) as ex:
-            if getattr(ex, "viewer_error", None):
-                print(f"Note: {ex.viewer_error}", file=out)
-            result = ex.execute(validated)
-    except Exception as exc:
-        print(f"Simulation error: {exc}", file=out)
-        return EXIT_SIM
-
-    for s in result.steps:
-        print(f"  [{s.index}] {s.action:<11} peak tracking error {s.max_tracking_error_rad:.3f} rad", file=out)
-    print(f"Result: {result.message} (sim time {result.sim_time_s:.2f}s)", file=out)
-    print("Final joint state: " + ", ".join(f"{k}={v:+.3f}" for k, v in result.final_state.items()), file=out)
-    return EXIT_OK if result.success else EXIT_SIM
-
-
-def _make_planner(args) -> Planner:
-    if args.offline:
-        return OfflinePlanner()
-    provider = args.provider or default_provider()
-    return make_planner(provider, DEFAULT_ROBOT, model=args.model, thinking_level=args.thinking)
+EXIT_OK, EXIT_REJECTED, EXIT_PLANNER, EXIT_SIM, EXIT_NOT_DONE = 0, 2, 3, 4, 5
+DEMOS = {
+    "stack the red cube on the blue cube": "pick + place_on",
+    "pick up the green cube": "single pick",
+    "build a tower": "three-cube tower over several closed-loop rounds",
+    "unsafe demo": "carries a cube off the table; the validator rejects it every round",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="orb", description="OpenRobot-Brain: language → validated plan → MuJoCo.")
+    p = argparse.ArgumentParser(prog="orb", description="OpenRobot-Brain: GPT-6 Astra + vision → validated "
+                                                        "pick-and-place on a simulated Franka Panda.")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    def add_exec_flags(sp):
-        sp.add_argument("--execute", action="store_true", help="run the validated plan in MuJoCo (default: dry run)")
-        sp.add_argument("--headless", action="store_true", help="no viewer window")
-
-    sp = sub.add_parser("plan", help="plan a natural-language task")
+    sp = sub.add_parser("run", aliases=["plan"], help="run a natural-language task")
     sp.add_argument("task")
-    sp.add_argument("--offline", action="store_true", help="use the rule-based demo planner (no API key)")
-    sp.add_argument("--provider", choices=PROVIDERS, default=None,
-                    help="AI planner: gemini (Gemini 4 Argon) or openai (GPT-6 Astra). "
-                         "Default: $ORB_PROVIDER, else whichever API key is set")
-    sp.add_argument("--model", default=None,
-                    help="override model ID (defaults: gemini-4-argon / gpt-6-astra, or $GEMINI_MODEL / $OPENAI_MODEL)")
-    sp.add_argument("--thinking", choices=OPENAI_EFFORTS, default="low",
-                    help="reasoning effort; gemini accepts low/medium/high, openai also xhigh/max")
-    sp.add_argument("--save", type=Path, help="write the raw plan JSON to this file")
-    add_exec_flags(sp)
+    sp.add_argument("--execute", action="store_true", help="execute in MuJoCo (default: validate round 1 only)")
+    sp.add_argument("--headless", action="store_true", help="no viewer window")
+    sp.add_argument("--hold", action="store_true", help="keep the viewer open after the task ends")
+    sp.add_argument("--speed", type=float, default=1.0, help="viewer playback speed, e.g. 0.5 = slow motion")
+    sp.add_argument("--offline", action="store_true", help="scripted demo planner (no API key, not AI)")
+    sp.add_argument("--no-vision", action="store_true", help="give the model object positions instead of an image")
+    sp.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"), default="low",
+                    help="Astra reasoning effort")
+    sp.add_argument("--model", default=None, help="model ID (default: $OPENAI_MODEL or gpt-6-astra)")
+    sp.add_argument("--rounds", type=int, default=None, help=f"max rounds (cap {PANDA.safety.max_rounds})")
+    sp.add_argument("--seed", type=int, default=None, help="random cube layout (default: fixed layout)")
+    sp.add_argument("--save-images", type=Path, default=None, help="save each round's camera image here")
+    sp.add_argument("--record", type=Path, default=None,
+                    help="render a captioned video of the run (.mp4 needs the [video] extra, .gif works anywhere)")
 
-    sp = sub.add_parser("validate", help="validate (and optionally run) a plan JSON file")
-    sp.add_argument("file", type=Path)
-    add_exec_flags(sp)
+    sp = sub.add_parser("snapshot", help="save overhead and front camera images of the scene")
+    sp.add_argument("--seed", type=int, default=None)
+    sp.add_argument("--out", type=Path, default=Path("snapshots"))
 
-    sub.add_parser("sim-check", help="load the MuJoCo scene and run a headless smoke test")
+    sub.add_parser("sim-check", help="load the scene and run a headless pick-and-place smoke test")
     sub.add_parser("demos", help="list offline demo tasks")
     return p
+
+
+def _cmd_run(args) -> int:
+    from .agent import run_agent
+    from .planner import AstraPlanner, OfflinePlanner, PlannerError
+    from .simulation.executor import IMAGE_H, IMAGE_W, PandaSim, SimulationError, VisionUnavailable, random_layout
+
+    vision = not args.no_vision and not args.offline
+    try:
+        if args.offline:
+            planner = OfflinePlanner()
+            print("Planner: offline scripted demo (not AI; uses simulator state)")
+        else:
+            planner = AstraPlanner(PANDA, vision=vision, image_size=(IMAGE_W, IMAGE_H), model=args.model,
+                                   effort=args.effort)
+            print(f"Planner: OpenAI {planner.model} (effort={args.effort}, "
+                  f"{'vision: overhead camera image' if vision else 'state: object positions'})")
+    except PlannerError as exc:
+        print(f"Planner error: {exc}")
+        return EXIT_PLANNER
+
+    headless = args.headless or not args.execute
+    try:
+        with PandaSim(PANDA, headless=headless, speed=args.speed) as sim:
+            if args.seed is not None:
+                sim.reset(random_layout(args.seed, PANDA))
+            if sim.viewer_error:
+                print(f"Note: {sim.viewer_error}")
+            if args.record:
+                try:
+                    sim.start_recording(args.record)
+                except Exception as exc:
+                    print(f"Recording error: {exc}")
+                    return EXIT_SIM
+            try:
+                outcome = run_agent(args.task, planner, sim, PANDA, execute=args.execute, vision=vision,
+                                    max_rounds=args.rounds, save_dir=args.save_images)
+            except KeyboardInterrupt:
+                print("\nCancelled.")
+                return EXIT_PLANNER
+            if args.record:
+                path = sim.stop_recording()
+                if path:
+                    print(f"\nVideo saved: {path}")
+            if args.hold and sim.has_viewer:
+                print("\nViewer held open — close the window to exit.")
+                sim.hold()
+    except VisionUnavailable as exc:
+        print(f"Vision error: {exc}")
+        return EXIT_SIM
+    except (SimulationError, PlannerError) as exc:
+        print(f"Error: {exc}")
+        return EXIT_SIM
+    return {"done": EXIT_OK, "dry_run": EXIT_OK, "rejected": EXIT_REJECTED, "error": EXIT_PLANNER}.get(
+        outcome.status, EXIT_NOT_DONE)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         from dotenv import load_dotenv
-        load_dotenv()  # reads .env from the current directory; values never printed
+        load_dotenv()  # .env in the current directory; values are never printed
     except ImportError:  # pragma: no cover
         pass
 
     if args.cmd == "demos":
-        for k, v in OFFLINE_PLANS.items():
-            print(f"  {k:<14} {v['summary']}")
+        for k, v in DEMOS.items():
+            print(f'  orb run "{k}" --offline --execute    # {v}')
         return EXIT_OK
 
     if args.cmd == "sim-check":
+        import json
+
         from .simulation.executor import SimulationError, smoke_check
         try:
-            report = smoke_check(DEFAULT_ROBOT)
+            report = smoke_check(PANDA)
         except SimulationError as exc:
             print(f"sim-check FAILED: {exc}")
             return EXIT_SIM
-        print(json.dumps(report, indent=2, default=str))
-        print("sim-check OK" if report["responds_to_commands"] else "sim-check FAILED: arm did not track commands")
-        return EXIT_OK if report["responds_to_commands"] else EXIT_SIM
+        print(json.dumps(report, indent=2))
+        ok = report["pick_and_place_executed"] and report["red_on_blue"]
+        print("sim-check OK" if ok else "sim-check FAILED")
+        return EXIT_OK if ok else EXIT_SIM
 
-    if args.cmd == "validate":
+    if args.cmd == "snapshot":
+        from .simulation.executor import PandaSim, VisionUnavailable, random_layout
         try:
-            text = args.file.read_text(encoding="utf-8")
-        except OSError as exc:
-            print(f"cannot read {args.file}: {exc}")
-            return EXIT_PLANNER
-        return run_pipeline(text, execute=args.execute, headless=args.headless)
+            with PandaSim(PANDA) as sim:
+                if args.seed is not None:
+                    sim.reset(random_layout(args.seed, PANDA))
+                args.out.mkdir(parents=True, exist_ok=True)
+                for cam in ("overhead", "front"):
+                    path = args.out / f"{cam}.png"
+                    path.write_bytes(sim.to_png(sim.render(cam)))
+                    print(f"saved {path}")
+        except VisionUnavailable as exc:
+            print(f"Vision error: {exc}")
+            return EXIT_SIM
+        return EXIT_OK
 
-    # plan
-    try:
-        planner = _make_planner(args)
-        vendor = {"gemini": "Gemini", "openai": "OpenAI"}.get(planner.name, planner.name)
-        label = "offline demo planner (rule-based, no AI)" if args.offline else f"{vendor} model {planner.model}"
-        print(f"Planning with {label}...")
-        if not args.offline:
-            print(f"Waiting for {vendor} (effort={args.thinking}; usually 10-60 s, Ctrl+C to cancel)...", flush=True)
-        t0 = time.monotonic()
-        text = planner.plan_text(args.task)
-        if not args.offline:
-            print(f"{vendor} replied in {time.monotonic() - t0:.1f} s.\n")
-    except PlannerError as exc:
-        print(f"Planner error: {exc}")
-        return EXIT_PLANNER
-    except KeyboardInterrupt:
-        print("\nCancelled. Nothing was planned or executed.")
-        return EXIT_PLANNER
-    if args.save:
-        args.save.write_text(text, encoding="utf-8")
-        print(f"Raw plan saved to {args.save}")
-    return run_pipeline(text, execute=args.execute, headless=args.headless)
+    return _cmd_run(args)
 
 
 if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())
+    sys.exit(main())

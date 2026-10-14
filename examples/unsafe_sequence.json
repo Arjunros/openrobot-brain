@@ -1,7 +1,0 @@
-{
-  "summary": "Each target is within 0.8 rad of home, but the last move is a 1.4 rad jump from where the arm will be. Must be rejected.",
-  "actions": [
-    {"action": "move_joints", "duration_s": 1.0, "targets": [{"joint": "shoulder_yaw", "position_rad": 0.7}]},
-    {"action": "move_joints", "duration_s": 2.0, "targets": [{"joint": "shoulder_yaw", "position_rad": -0.7}]}
-  ]
-}

@@ -1,0 +1,8 @@
+OpenRobot-Brain
+Copyright 2026 Arjun
+
+This product includes the Franka Emika Panda model from Google DeepMind's
+MuJoCo Menagerie (https://github.com/google-deepmind/mujoco_menagerie),
+licensed under the Apache License 2.0. The model files, their license, and a
+description of the modifications made are in
+src/openrobot_brain/simulation/franka_emika_panda/.

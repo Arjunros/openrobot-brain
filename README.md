@@ -1,40 +1,40 @@
 # OpenRobot-Brain
 
-**Natural language → Gemini 4 Argon or GPT-6 Astra → validated action plan → MuJoCo simulation.**
+**GPT-6 Astra looks at a table through a camera, plans pick-and-place for a Franka Panda, and local code checks every motion before the robot moves.**
 
-OpenRobot-Brain turns an instruction like *"wave hello"* into a joint-space plan for a simulated 4-DOF arm. The language model only *proposes* a plan. Local code parses it strictly, validates it against the robot's limits as a sequence, shows it to you, and runs it in MuJoCo only when you ask.
+![Three-cube tower built in a closed loop](docs/media/tower_demo.gif)
+
+<sub>Demo above: the offline scripted planner (no AI), recorded with `--record`. With an API key, GPT-6 Astra plans from the camera image instead.</sub>
+
+## What it does
+
+You type a task like *"stack the red cube on the blue cube"*. Each round:
+
+1. **See.** The arm parks out of view and an overhead camera takes a picture.
+2. **Think.** GPT-6 Astra gets the image and returns where each object is (pixel coordinates), what it decides, and up to 6 high-level actions (`pick`, `place_on`, `place_at`, `move_to`, `go_home`, `wait`). It can also answer `done` or `infeasible`.
+3. **Ground.** The robot converts those pixels into metres with a calibrated camera model. The model never invents raw coordinates.
+4. **Check.** Actions are expanded into the exact joint trajectory the arm would follow, and every sample is checked: inverse kinematics, joint limits and speeds, workspace, transit height, and collisions with the table and other objects. One violation rejects the whole round and nothing moves.
+5. **Act.** MuJoCo plays the validated trajectory on a physically simulated Panda.
+6. **Learn.** What happened (grasp succeeded, gripper closed on nothing, plan rejected and why) goes back to the model with a fresh image, and it tries again, up to a capped number of rounds.
 
 ```
-"wave hello"
-   │
-   ▼
-Gemini 4 Argon  or  GPT-6 Astra   (structured JSON output)     ← untrusted
-   │  raw JSON text
-   ▼
-schema.parse_plan_json   strict Pydantic: allowlisted actions, no extra fields, finite numbers
-   │  ActionPlan
-   ▼
-safety.validate_plan     joint names, limits, per-step delta, speed, durations — tracked step by step
-   │  ValidatedPlan (only this type can reach the executor)
-   ▼
-dry-run preview  ── default, stops here
-   │  --execute
-   ▼
-MujocoExecutor           minimum-jerk interpolation, headless or viewer
+camera ─▶ GPT-6 Astra ─▶ pixels → metres ─▶ skills → joint trajectory ─▶ safety checks ─▶ MuJoCo
+   ▲            (untrusted)                                              │ reject: nothing moves
+   └──────────────── outcome + new image ◀───────────────────────────────┘
 ```
 
-> **Scope (Milestone 1).** Simulation only. The arm has no gripper, camera or inverse kinematics, and the project does not claim grasping, perception or IK. There is no code path to real hardware.
+**The model proposes; local code decides.** Model output is treated as untrusted input at every step.
 
-## Requirements
+## Honest scope
 
-- Windows 10/11 (also runs on Linux/macOS), Python 3.11+
-- For live planning, **one** of:
-  - a Gemini API key on the **paid tier** (Gemini 4 Argon isn't on the free tier), or
-  - an OpenAI API key with credit on the account (GPT-6 Astra; API billing is separate from ChatGPT Plus/Pro).
+- Simulation only (MuJoCo). There is no code path to real hardware.
+- Objects are 4 cm cubes; the gripper always points straight down.
+- GPT-6 Astra is the only AI planner. The `--offline` planner is a short script for demos and tests, and it is labelled as such everywhere.
+- The vision pipeline is fully tested with a stand-in "model" that finds colour blobs in the rendered image. **How precisely GPT-6 Astra reads pixel positions is not yet measured.** Every run prints the perception error against simulator ground truth, so you can measure it.
 
-  Everything else, including the offline demo and the full test suite, works without a key.
+## Install (Windows PowerShell)
 
-## Install (PowerShell)
+Requires Python 3.11+.
 
 ```powershell
 git clone https://github.com/<your-username>/openrobot-brain.git
@@ -42,72 +42,87 @@ cd openrobot-brain
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -e ".[dev]"
+pip install -e ".[dev,video]"
 ```
 
-If activation is blocked: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+If activation is blocked, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once. Your prompt must show `(.venv)` before you use `pip` or `orb`.
 
-Set up your key (optional):
+API key (only needed for GPT-6 Astra):
 
 ```powershell
 Copy-Item .env.example .env
-notepad .env        # set GEMINI_API_KEY=... and/or OPENAI_API_KEY=...
+notepad .env          # OPENAI_API_KEY=sk-...   (never screenshot this file)
 ```
 
 ## Run
 
 ```powershell
-orb sim-check                                        # load scene, verify joints/actuators, headless motion test
-orb demos                                            # list offline demo tasks
-orb plan "wave" --offline                            # offline planner, dry run (default)
-orb plan "wave" --offline --execute                  # run in the MuJoCo viewer
-orb plan "wave" --offline --execute --headless       # run without a window
-orb plan "unsafe demo" --offline --execute           # watch the validator reject a plan
+orb sim-check                                                     # headless physics smoke test
+orb demos                                                         # list offline demo tasks
 
-orb plan "turn left, pause, then come back" --execute                     # Gemini 4 Argon
-orb plan "turn left, pause, then come back" --provider openai --execute   # GPT-6 Astra
-orb plan "nod twice slowly" --thinking medium --save plan.json # keep the raw model output
-orb validate examples\turn_left.json --execute
-orb validate examples\unsafe_sequence.json                     # rejected
+# No API key needed (scripted, not AI)
+orb run "build a tower" --offline --execute
+orb run "unsafe demo" --offline --execute                         # rejected every round, nothing moves
+
+# GPT-6 Astra with vision
+orb run "stack the red cube on the blue cube"                     # plan + validate round 1 only (dry run)
+orb run "stack the red cube on the blue cube" --execute           # closed loop in the MuJoCo viewer
+orb run "build a tower with blue at the bottom" --execute --seed 7 # random cube layout
+orb run "pick up the purple cube" --execute                       # expect: NOT FEASIBLE
+orb run "stack red on blue" --no-vision --execute                 # model gets positions instead of an image
+
+# Recording and presentation
+orb run "build a tower" --execute --hold --speed 0.5              # keep the window open, slow motion
+orb run "build a tower" --execute --headless --record tower.mp4   # captioned video, no screen recording
+orb run "build a tower" --execute --save-images rounds            # save what the model saw each round
+orb snapshot --seed 7                                             # save overhead + front camera images
 ```
 
-Exit codes: `0` ok, `2` plan rejected, `3` planner/credential error, `4` simulation error.
+| Flag | Meaning |
+|---|---|
+| `--execute` | run in MuJoCo. Without it, round 1 is planned and validated only. |
+| `--headless` | no window |
+| `--hold` | keep the viewer open after the run |
+| `--speed 0.5` | viewer and video playback speed |
+| `--record x.mp4` / `x.gif` | captioned video from the simulator (`.mp4` needs the `video` extra) |
+| `--no-vision` | send object positions as text instead of an image |
+| `--effort low…max` | Astra reasoning effort (default `low`) |
+| `--rounds N` | round limit (cap 8) |
+| `--seed N` | random cube layout |
+| `--offline` | scripted demo planner, no API |
+
+Exit codes: `0` done or dry run, `2` rejected by safety, `3` planner/API error, `4` simulation error, `5` not completed (infeasible or round limit).
 
 ## Test
 
 ```powershell
-pytest                       # unit + simulation tests, no API key needed
-$env:ORB_LIVE_KEY = "your-gemini-key"; pytest -m live          # optional live Gemini round-trip
-$env:ORB_LIVE_OPENAI_KEY = "your-openai-key"; pytest -m live   # optional live OpenAI round-trip
+pytest                                                             # ~120 tests, no API key, ~1 min
+$env:ORB_LIVE_OPENAI_KEY = "sk-..."; pytest -m live -s             # optional: one live Astra vision run
 ```
 
-## Project layout
+The suite runs real physics (grasps, stacking, missed grasps), real rendering, and the full closed loop: a stand-in vision model misreads a cube by 60 px, the grasp misses, the failure is fed back, and the next round succeeds. The OpenAI client is never called in unit tests.
+
+## Layout
 
 ```
 src/openrobot_brain/
-  config.py            robot joints, software limits, safety limits
-  schema.py            strict Pydantic action schema + JSON parsing
-  safety.py            independent, sequence-aware validator → ValidatedPlan
-  planner.py           Gemini 4 Argon + GPT-6 Astra adapters, offline demo planner
-  cli.py               `orb` command
+  agent.py        closed loop: observe → plan → ground → validate → execute → feed back
+  planner.py      GPT-6 Astra (Responses API, image input, strict JSON) + offline script
+  schema.py       strict round schema: status, message, observations, actions
+  perception.py   model pixels → metres; perception error vs ground truth
+  skills.py       pick / place_on / place_at / move_to / go_home / wait → joint trajectories
+  safety.py       independent trajectory validator → ValidatedPlan
+  world.py        world belief (objects, stacks, held object)
+  config.py       joint limits, workspace, speeds, safety limits
   simulation/
-    orb_arm.xml        4-DOF arm, position actuators
-    executor.py        MuJoCo-only executor, smoke check
-tests/                 pytest suite (mocked Gemini, real MuJoCo)
-docs/architecture.md   design and data flow
-docs/safety.md         threat model and every check
-examples/              hand-written plans for `orb validate`
+    executor.py   PandaSim: reset, camera, execute, grasp detection, viewer
+    kinematics.py IK (damped least squares), FK, collision queries on a scratch copy
+    camera.py     pinhole camera model (world ↔ pixel)
+    recorder.py   captioned MP4/GIF rendering
+    franka_emika_panda/   Menagerie Panda (Apache-2.0) + tabletop scene
+docs/architecture.md, docs/safety.md
 ```
 
-## Planners
+## Credits and license
 
-| Provider | Default model | API | Structured output | Effort flag |
-|---|---|---|---|---|
-| `gemini` | `gemini-4-argon` | Interactions API (`client.interactions.create`) | `response_format` JSON schema | `--thinking low/medium/high` |
-| `openai` | `gpt-6-astra` | Responses API (`client.responses.create`) | `text.format` json_schema, `strict: true` | `--thinking low/medium/high/xhigh/max` |
-
-Pick one with `--provider`, or set `ORB_PROVIDER` in `.env`. Without either, the CLI uses Gemini if `GEMINI_API_KEY` is set, otherwise OpenAI. Both get the same system prompt and schema, and both outputs go through the same parser and safety validator, so neither model is trusted more than the other. Sampling parameters (`temperature`, `top_p`) aren't sent; both models ignore or reject them. Requests use `store=False`. Model IDs are never substituted automatically; override with `--model` or `GEMINI_MODEL` / `OPENAI_MODEL`.
-
-## License
-
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE). Franka Emika Panda model from [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) (Apache-2.0), with one added TCP site.

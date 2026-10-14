@@ -1,49 +1,67 @@
 # Architecture
 
-## Design principle
+## Principle
 
-The language model is a *proposal generator*, not a controller. Everything it returns is untrusted text. Authority over what moves sits entirely in local, deterministic, tested code.
+The language model is a proposal generator. Its output is untrusted text. Everything that decides whether and how the robot moves is local, deterministic, and tested.
 
-## Data flow
+## One round of the loop (`agent.py`)
 
-| Stage | Module | Input → Output | Fails with |
+| Step | Module | In → Out | On failure |
 |---|---|---|---|
-| Plan | `planner.py` | task string → raw JSON text | `PlannerError`, `MissingCredentialsError` |
-| Parse | `schema.py` | text → `ActionPlan` | `PlanParseError` |
-| Validate | `safety.py` | `ActionPlan` + start state → `ValidatedPlan` | `SafetyError` (all violations listed) |
-| Preview | `cli.py` | `ValidatedPlan` → human-readable table | — |
-| Execute | `simulation/executor.py` | `ValidatedPlan` → `ExecutionResult` | `SimulationError` |
+| Observe | `simulation/executor.py` | sim → overhead PNG (vision) or object list (state) | `VisionUnavailable` → suggest `--no-vision` |
+| Plan | `planner.py` | prompt + image → JSON text | `PlannerError`, round stops |
+| Parse | `schema.py` | text → `AgentResponse` | `PlanParseError`, fed back to the model |
+| Ground | `perception.py` | observations (pixels) → `WorldState` (metres) | warnings; bad objects dropped |
+| Expand | `skills.py` | actions + belief → timed joint `Segment`s | precondition violations |
+| Validate | `safety.py` | segments → `ValidatedPlan` | `SafetyError`, fed back, nothing moves |
+| Execute | `simulation/executor.py` | `ValidatedPlan` → `RoundResult` | stops on missed grasp, drop, or blocked arm |
 
-Each stage only accepts the previous stage's output type. `ValidatedPlan` can only be constructed inside `safety.validate_plan` (a private token guards the constructor), and `MujocoExecutor.execute` type-checks for it. An unvalidated plan has no path to the simulator.
+After 3 consecutive invalid or rejected rounds, or the round limit (8), the loop stops.
 
-## Planners
+## Planner (`planner.py`)
 
-All planners implement `plan_text(task) -> str`, so they all go through the same parser and validator.
+`AstraPlanner` calls `client.responses.create` with:
 
-- **`GeminiPlanner`** — `google-genai` ≥ 2.3, Interactions API (`client.interactions.create`). Sends a system instruction with joint names, ranges, home pose and every safety limit; requests structured JSON via `response_format` with a schema whose joint names are an enum; `thinking_level` low/medium/high; `store=False`. The client is injectable, which is how tests mock it.
-- **`OpenAIPlanner`** — `openai` SDK, Responses API (`client.responses.create`) with `gpt-6-astra`. Same system instruction as Gemini, sent as `instructions`; strict structured output via `text.format` (`json_schema`, `strict: true`). Strict mode accepts only a JSON-schema subset, so `openai_response_schema` drops array-size keywords; local validation still enforces them. `reasoning.effort` low…max; `store=False`; SDK retries capped at 1 so quota errors show up quickly. Incomplete responses are treated as failures.
-- **Provider selection** — `make_planner(provider, ...)`; `--provider` > `ORB_PROVIDER` > whichever key is set (Gemini first).
-- **`OfflinePlanner`** — keyword lookup over a few hand-written plans. It is not an AI planner; it exists so the demo and CI work without a key. One entry (`unsafe demo`) is deliberately unsafe to show rejection.
+- `model="gpt-6-astra"` (override with `--model` or `OPENAI_MODEL`; never substituted automatically);
+- `instructions`: robot, frame conventions, image conventions, the action list with its limits, and the status protocol;
+- `input`: the round prompt (task, round number, gripper state, last 4 rounds of actions, outcomes and rejections) plus the overhead image as a base64 PNG (`detail: high`);
+- `text.format`: strict `json_schema` (`schema.response_json_schema()`);
+- `reasoning.effort` low…max, `store=False`, at most 1 SDK retry.
 
-## Schema
+`OfflinePlanner` is a short deterministic script that reads simulator ground truth. It exists for demos and CI and is labelled "not AI" in the CLI and videos.
 
-`ActionPlan = {summary: str, actions: [MoveJoints | Wait]}` with a discriminator on `action`.
+## Perception (`perception.py`, `simulation/camera.py`)
 
-- `MoveJoints`: `targets: [{joint, position_rad}]`, `duration_s`
-- `Wait`: `duration_s`
+The overhead camera is a fixed pinhole camera (640×480, 38° vertical FOV, 1.2 m above the table, looking straight down). The model reports each object's pixel centre of its visible top face and what it is stacked on. `perceive()` intersects that pixel's viewing ray with the plane at the object's top-face height to get metres. Stack levels come from the `on_top_of` chain; unknown or circular references are warned about and treated as "on the table".
 
-All models use `extra="forbid"`, `strict=True`, and finite floats. Joint targets are a list of objects rather than a dict, because that maps cleanly onto JSON-schema structured output. Units are radians and seconds throughout.
+An object held in the gripper is not visible (the arm parks out of view), so the belief carries it over from the previous round.
 
-## Simulation
+`score_perception()` compares the belief with simulator ground truth (nearest object, distance, colour word match). This is reporting only and is never used for control in vision mode.
 
-`orb_arm.xml` defines a 4-hinge arm (`shoulder_yaw`, `shoulder_pitch`, `elbow_pitch`, `wrist_pitch`) with one position actuator per joint and gravity compensation on the links. `bind_joints` maps each configured joint to its `qpos` index and actuator by inspecting the compiled model (not by assuming order), and fails if a joint is missing, has zero or several actuators, or if the software range in `config.py` isn't inside both the joint range and the actuator `ctrlrange`.
+## Skills (`skills.py`)
 
-The executor streams setpoints along a minimum-jerk curve between validated waypoints at the physics rate (500 Hz), lets each move settle for 0.25 s, and stops if the arm ends a step more than 0.05 rad from its target. Before running, it checks that the simulator's current state matches the start state the plan was validated against; otherwise it refuses and asks for re-validation.
+Each action becomes a list of `Segment`s: dense joint waypoints with timestamps, a gripper command, and the predicted world during the segment.
 
-The viewer is optional. If `mujoco.viewer.launch_passive` fails (no display, missing OpenGL), the executor records the reason and continues headless. Resources are released through the context manager.
+- `pick`: leave the park pose → rise to transit height (16 cm) → move above the object → descend → close the gripper → lift.
+- `place_on` / `place_at`: carry at transit height → descend to 3 mm above the release height → open → retreat.
+- `move_to`: rise → move above → descend.
+- `go_home` and the automatic end of every round: rise → joint-space move to the park pose.
+
+Cartesian segments follow straight lines with a minimum-jerk profile (peak 0.25 m/s in transit, 0.10 m/s vertically), sampled every ~5 mm, with IK chained from the previous sample. IK is damped least squares on position and orientation (gripper straight down) with a null-space pull toward a comfortable posture, clamped to the software joint limits.
+
+## Safety (`safety.py`)
+
+See [safety.md](safety.md). `ValidatedPlan` can only be constructed by `validate_round` (token-guarded), it is single-use, and it records the gripper state it was validated with.
+
+## Simulation (`simulation/`)
+
+- `orb_tabletop.xml`: the Menagerie Panda, a work mat, three free-floating 4 cm cubes, and two cameras (`overhead` for the model, `front` for videos). Physics timestep 2 ms, elliptic friction cones.
+- `PandaSim.execute` streams the trajectory to the position actuators at the physics rate. After "close gripper" it reads the finger width: below 1 cm means the gripper closed on nothing ("grasp missed"). It also checks the object is still held after lifting, and aborts if the arm lags its command by more than 0.12 rad (something unexpected is blocking it).
+- Viewer is optional (`launch_passive`); if it fails, the run continues headless. `--speed` paces the viewer and video; physics is unaffected.
+- `Recorder` renders the `front` camera with captions (round, model message, current motion, validation badge) to MP4 (imageio/ffmpeg) or GIF (Pillow).
 
 ## Extending
 
-- **New robot:** add a `RobotConfig` and an MJCF file; `bind_joints` and the tests will catch mismatches.
-- **New action:** add a Pydantic model to the `Action` union, a branch in `validate_plan`, a branch in the executor, and the schema entry in `gemini_response_schema`. Do all four or the action stays unreachable.
-- **Real hardware:** intentionally out of scope. It would need its own executor behind the same `ValidatedPlan` boundary, plus hardware-level limits, e-stop and watchdogs that don't depend on this code.
+- **New object types:** extend `WorldState` with sizes and shapes, the scene XML, and the grasp heights in `skills.py`.
+- **Grasp orientation:** add a yaw parameter to `pick` and rotate `R_DOWN`; the validator needs no change.
+- **Real hardware:** out of scope by design. It would need its own executor behind the same `ValidatedPlan` boundary, plus hardware-level limits, e-stop, and perception that does not rely on the simulator.
