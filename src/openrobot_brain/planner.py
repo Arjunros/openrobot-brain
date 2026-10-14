@@ -81,8 +81,9 @@ Each round you get one top-down image ({image_w}x{image_h} px) from a fixed over
 Pixel origin is the top-left corner; u grows to the right, v grows downward.
 In the image, UP is +x (away from the robot) and RIGHT is -y (the robot's right).
 List every object you can see in `observations`:
-  id: short lowercase id you choose (e.g. "red_cube"); keep ids stable across rounds
-  label: what it is, including colour (e.g. "red cube")
+  id: lowercase letters, digits, underscores, max 24 chars, starting with a letter (e.g. "red_cube");
+      keep ids stable across rounds
+  label: 2-4 words, colour + shape, at most 80 characters (e.g. "red cube")
   u, v: pixel centre of the object's visible TOP face, as precisely as you can
   on_top_of: id of the object it rests on, or "" if it is on the table
 The robot converts your pixel coordinates to metres itself. Refer to objects by id in actions.

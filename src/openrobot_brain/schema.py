@@ -70,7 +70,7 @@ Action = Annotated[Union[Pick, PlaceOn, PlaceAt, MoveTo, GoHome, Wait], Field(di
 
 class Observation(_Strict):
     id: ObjectId
-    label: Annotated[str, Field(min_length=1, max_length=40)]
+    label: Annotated[str, Field(min_length=1, max_length=80)]
     u: FiniteFloat
     v: FiniteFloat
     on_top_of: Annotated[str, Field(max_length=24)] = ""

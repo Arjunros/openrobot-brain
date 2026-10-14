@@ -98,3 +98,16 @@ def test_schema_has_no_code_or_safety_override_fields():
     for word in ("code", "command", "safe", "override", "joint"):
         assert f'"{word}"' not in flat
     assert AgentResponse.model_config["extra"] == "forbid"
+
+
+def test_label_length_limit_matches_instructions():
+    from openrobot_brain.config import PANDA
+    from openrobot_brain.planner import system_instructions
+    long_ok = "red cube partially hidden under the green one"   # 45 chars, seen from a real Astra run
+    parse_agent_json(respond("done", observations=[{"id": "red_cube", "label": long_ok, "u": 1, "v": 1,
+                                                    "on_top_of": ""}]))
+    with pytest.raises(PlanParseError):
+        parse_agent_json(respond("done", observations=[{"id": "red_cube", "label": "x" * 81, "u": 1, "v": 1,
+                                                        "on_top_of": ""}]))
+    text = system_instructions(PANDA, True, 640, 480)
+    assert "at most 80 characters" in text and "max 24 chars" in text

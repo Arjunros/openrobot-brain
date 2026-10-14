@@ -30,7 +30,8 @@ camera ─▶ GPT-6 Astra ─▶ pixels → metres ─▶ skills → joint traje
 - Simulation only (MuJoCo). There is no code path to real hardware.
 - Objects are 4 cm cubes; the gripper always points straight down.
 - GPT-6 Astra is the only AI planner. The `--offline` planner is a short script for demos and tests, and it is labelled as such everywhere.
-- The vision pipeline is fully tested with a stand-in "model" that finds colour blobs in the rendered image. **How precisely GPT-6 Astra reads pixel positions is not yet measured.** Every run prints the perception error against simulator ground truth, so you can measure it.
+- **First live result (one run, not a benchmark):** GPT-6 Astra (`effort=low`) located all three visible cubes from the overhead image to within **0.0–0.2 cm** of ground truth and completed "stack the red cube on the blue cube" in 3 rounds (one round was an invalid response, rejected and fed back). The partly hidden base cube was estimated within 1.9 cm. Every run prints these errors, so you can check them yourself.
+- The vision pipeline is also tested offline with a stand-in "model" that finds colour blobs in the rendered image.
 
 ## Install (Windows PowerShell)
 

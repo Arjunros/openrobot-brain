@@ -24,3 +24,8 @@ Thumbs.db
 
 # MuJoCo
 MUJOCO_LOG.TXT
+
+# local outputs
+*.mp4
+snapshots/
+rounds/
