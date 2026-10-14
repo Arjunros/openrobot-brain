@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openrobot-brain"
+version = "0.1.0"
+description = "Language-to-motion planning for a simulated robot arm: Gemini plans, local code validates, MuJoCo executes."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+authors = [{ name = "Arjun" }]
+dependencies = [
+    "google-genai>=2.3.0",
+    "mujoco>=3.2",
+    "pydantic>=2.6,<3",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+orb = "openrobot_brain.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+openrobot_brain = ["simulation/*.xml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "live: requires a real Gemini API key and network access (skipped by default)",
+]
