@@ -20,8 +20,8 @@ import numpy as np
 
 from .config import RobotConfig
 from .schema import Action, GoHome, MoveTo, Pick, PlaceAt, PlaceOn, Wait
-from .simulation.kinematics import Kinematics
-from .world import WorldState
+from .simulation.kinematics import Kinematics, grasp_rotation, tcp_yaw
+from .world import WorldState, wrap_square
 
 CART_STEP_M = 0.005
 JOINT_STEP_RAD = 0.02
@@ -64,23 +64,62 @@ class SkillExpander:
         self.ws = robot.workspace
 
     # -- helpers ------------------------------------------------------------------
-    def _cartesian(self, idx, label, q0, p1, world, gripper, finger_open, speed, **kw) -> Segment:
-        p0, _ = self.kin.fk(q0)
+    def _cartesian(self, idx, label, q0, p1, world, gripper, finger_open, speed, yaw1=None, **kw) -> Segment:
+        """Straight line to p1 with the gripper pointing down. If yaw1 is given, the gripper turns
+        smoothly from its current yaw to yaw1 along the way (never all at once: that would make the
+        wrist jump between two samples, which the validator rejects)."""
+        p0, R0 = self.kin.fk(q0)
+        yaw0 = tcp_yaw(R0)
+        yaw1 = yaw0 if yaw1 is None else yaw1
         dist = float(np.linalg.norm(p1 - p0))
-        n = max(4, math.ceil(dist / CART_STEP_M))
-        T = max(MIN_SEG_S, 1.875 * dist / speed)  # peak min-jerk speed = 1.875 * dist / T
+        turn = abs(yaw1 - yaw0)
+        vmax = 0.6 * self.robot.safety.max_joint_velocity_rad_s  # the wrist does most of a turn
+        n = max(4, math.ceil(dist / CART_STEP_M), math.ceil(turn / JOINT_STEP_RAD))
+        T = max(MIN_SEG_S, 1.875 * dist / speed, 1.875 * turn / vmax)  # peak min-jerk rate = 1.875 * change / T
         s = np.linspace(0, 1, n + 1)
         qs, targets, errs = [q0.copy()], [p0], [(0.0, 0.0)]
         q = q0
         for si in min_jerk(s[1:]):
             p = p0 + si * (p1 - p0)
-            res = self.kin.ik(p, q)
+            res = self.kin.ik(p, q, grasp_rotation(yaw0 + si * (yaw1 - yaw0)))
             q = res.q
             qs.append(q)
             targets.append(p)
             errs.append((res.pos_err, res.rot_err))
         return Segment(idx, label, "cartesian", s * T, np.array(qs), gripper, finger_open, world.copy(),
                        tcp_targets=targets, ik_errors=errs, **kw)
+
+    def _yaw(self, q) -> float:
+        return tcp_yaw(self.kin.fk(q)[1])
+
+    def _choose_yaw(self, target_yaw: float, points: list[np.ndarray], q_seed: np.ndarray,
+                    world: WorldState | None = None, finger_open: bool = True,
+                    may_touch: frozenset[str] = frozenset()) -> float:
+        """A square can be gripped four ways (every 90 degrees). Try them from the smallest wrist turn
+        to the largest and return the first the arm can reach at every point without the open fingers
+        touching anything except `may_touch` at the last point. If none works, return the smallest
+        turn and let the validator explain why it fails."""
+        here = self._yaw(q_seed)
+        base = here + wrap_square(target_yaw - here)          # the nearest equivalent angle
+        options = sorted((base + k * np.pi / 2 for k in (-2, -1, 0, 1, 2)), key=lambda y: abs(y - here))
+        lim = self.robot.safety
+        for yaw in options:
+            q, ok = q_seed, True
+            for p in points:
+                res = self.kin.ik(p, q, grasp_rotation(yaw))
+                if res.pos_err > lim.ik_pos_tol_m or res.rot_err > lim.ik_rot_tol_rad:
+                    ok = False
+                    break
+                q = res.q
+            if ok and world is not None:
+                for a, b in self.kin.contacts(q, finger_open, world):
+                    other = b if a == "robot" else a if b == "robot" else None
+                    if other is not None and other not in may_touch and other != world.held:
+                        ok = False
+                        break
+            if ok:
+                return yaw
+        return options[0]
 
     def _joint(self, idx, label, q0, q1, world, gripper, finger_open) -> Segment:
         D = float(np.max(np.abs(q1 - q0)))
@@ -134,11 +173,13 @@ class SkillExpander:
                                             r.approach_speed_m_s, may_touch=frozenset({world.held} - {None})))
                 q = segs[-1].q[-1]
 
-        def travel(i, label, x, y):
+        def travel(i, label, x, y, yaw=None):
             nonlocal q
             segs.append(self._cartesian(i, label, q, np.array([x, y, ws.transit_z]), world, grip(), open_,
-                                        r.transit_speed_m_s))
+                                        r.transit_speed_m_s, yaw1=yaw))
             q = segs[-1].q[-1]
+
+        held_offset = 0.0  # held object's yaw minus the gripper's (about 0 for an aligned grasp)
 
         for i, a in enumerate(actions):
             where = f"action[{i}] {a.action}"
@@ -158,7 +199,10 @@ class SkillExpander:
                                                r.gripper_open_ctrl, True))
                         open_ = True
                     rise(i, "rise")
-                    travel(i, f"move above {a.object}", p[0], p[1])
+                    obj_yaw = world.objects[a.object].yaw
+                    g = self._choose_yaw(obj_yaw, [np.array([p[0], p[1], ws.transit_z]), p.copy()], q,
+                                         world, open_, frozenset({a.object}))
+                    travel(i, f"move above {a.object}", p[0], p[1], yaw=g)
                     segs.append(self._cartesian(i, f"descend to {a.object}", q, p.copy(), world, grip(), open_,
                                                 r.approach_speed_m_s, may_touch=frozenset({a.object})))
                     q = segs[-1].q[-1]
@@ -167,6 +211,7 @@ class SkillExpander:
                                            held_may_touch_floor=True))
                     open_ = False
                     world.held = a.object
+                    held_offset = wrap_square(obj_yaw - g)
                     segs.append(self._cartesian(i, f"lift {a.object}", q, np.array([p[0], p[1], ws.transit_z]),
                                                 world, grip(), open_, r.approach_speed_m_s,
                                                 may_touch=frozenset({a.object}), held_may_touch_floor=True))
@@ -188,6 +233,7 @@ class SkillExpander:
                         dest = base + np.array([0, 0, c])
                         touch = frozenset({world.held, a.object})
                         label = f"lower onto {a.object}"
+                        want_yaw = world.objects[a.object].yaw - held_offset   # line the cube up with the base
                     else:
                         if not ws.contains_xy(a.x, a.y):
                             raise SkillError(f"({a.x:.3f}, {a.y:.3f}) is outside the workspace "
@@ -199,10 +245,14 @@ class SkillExpander:
                         dest = np.array([a.x, a.y, c / 2])
                         touch = frozenset({world.held})
                         label = f"lower to ({a.x:.2f}, {a.y:.2f})"
+                        want_yaw = None                                        # keep the current turn
                     leave_rest(i)
                     rise(i, "rise")
-                    travel(i, "carry", dest[0], dest[1])
                     release = dest + np.array([0, 0, 0.003])
+                    g = self._yaw(q) if want_yaw is None else self._choose_yaw(
+                        want_yaw, [np.array([dest[0], dest[1], ws.transit_z]), release], q,
+                        world, open_, touch)
+                    travel(i, "carry", dest[0], dest[1], yaw=g)
                     segs.append(self._cartesian(i, label, q, release, world, grip(), open_, r.approach_speed_m_s,
                                                 may_touch=touch, held_may_touch_floor=isinstance(a, PlaceAt)))
                     q = segs[-1].q[-1]
@@ -212,6 +262,7 @@ class SkillExpander:
                                            held_may_touch_floor=isinstance(a, PlaceAt)))
                     open_ = True
                     world.objects[held].pos = dest.copy()
+                    world.objects[held].yaw = wrap_square(g + held_offset)
                     world.held = None
                     segs.append(self._cartesian(i, "retreat", q, np.array([dest[0], dest[1], ws.transit_z]), world,
                                                 grip(), open_, r.approach_speed_m_s, may_touch=touch - {None}))

@@ -34,6 +34,12 @@ def grasp_rotation(yaw: float) -> np.ndarray:
     return rot_z(yaw) @ R_DOWN
 
 
+def tcp_yaw(R: np.ndarray) -> float:
+    """Gripper yaw from a TCP rotation matrix: the angle of the finger-closing axis
+    (the TCP's y-axis) in the table plane. Inverse of grasp_rotation for a downward gripper."""
+    return float(np.arctan2(R[1, 1], R[0, 1]))
+
+
 def yaw_quat(yaw: float) -> tuple[float, float, float, float]:
     """MuJoCo quaternion (w, x, y, z) for a turn of `yaw` about the vertical."""
     return (float(np.cos(yaw / 2)), 0.0, 0.0, float(np.sin(yaw / 2)))
@@ -151,7 +157,12 @@ class Kinematics:
                 pos = _PARK
             self.d.qpos[adr:adr + 3] = pos
             # each object at its believed rotation: a turned cube reaches further toward its neighbours
-            self.d.qpos[adr + 3:adr + 7] = yaw_quat(objs[i].yaw) if i < len(objs) else (1, 0, 0, 0)
+            if i < len(objs):
+                # a held object turns with the gripper; a resting one sits at its believed rotation
+                yaw = tcp_yaw(self.d.site_xmat[self.tcp].reshape(3, 3)) if objs[i].id == world.held else objs[i].yaw
+                self.d.qpos[adr + 3:adr + 7] = yaw_quat(yaw)
+            else:
+                self.d.qpos[adr + 3:adr + 7] = (1, 0, 0, 0)
         mujoco.mj_fwdPosition(self.m, self.d)
 
         out: list[tuple[str, str]] = []

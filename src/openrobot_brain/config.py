@@ -71,6 +71,7 @@ class RobotConfig:
     gripper_open_ctrl: float = 255.0
     gripper_closed_ctrl: float = 0.0
     grasp_min_width_m: float = 0.01      # narrower than this after closing = nothing in the gripper
+    grasp_width_tol_m: float = 0.006     # wider than cube + this = gripping the corners (misaligned)
     transit_speed_m_s: float = 0.25
     approach_speed_m_s: float = 0.10
     gripper_time_s: float = 0.7

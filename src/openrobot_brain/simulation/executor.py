@@ -290,12 +290,17 @@ class PandaSim:
             i = seg.action_index
             if seg.label == "close gripper":
                 w = self.gripper_width()
-                ok = w > r.grasp_min_width_m
-                done_actions[i] = ActionOutcome(i, "pick", ok, f"gripper closed at {w * 100:.1f} cm "
-                                                + ("(holding an object)" if ok else "(closed on nothing: grasp missed)"))
+                if w <= r.grasp_min_width_m:
+                    ok, why, stop = False, "closed on nothing: grasp missed", "grasp missed"
+                elif w > r.cube_size_m + r.grasp_width_tol_m:
+                    # wider than the cube: the fingers are on its corners, not its faces
+                    ok, why, stop = False, "gripping the corners: grasp misaligned with the cube", "grasp misaligned"
+                else:
+                    ok, why, stop = True, "holding an object", ""
+                done_actions[i] = ActionOutcome(i, "pick", ok, f"gripper closed at {w * 100:.1f} cm ({why})")
                 if not ok:
                     res.completed = False
-                    res.message = f"stopped: grasp missed in action[{i}]"
+                    res.message = f"stopped: {stop} in action[{i}]"
                     break
             elif seg.label.startswith("lift"):
                 if not self.holding_something():

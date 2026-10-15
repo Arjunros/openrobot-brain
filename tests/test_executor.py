@@ -114,3 +114,32 @@ def test_record_rejects_bad_extension(robot, tmp_path):
     with PandaSim(robot) as sim:
         with pytest.raises(RecorderError, match=".mp4 or .gif"):
             sim.start_recording(tmp_path / "run.avi")
+
+
+def _turn(sim, name, deg):
+    a = sim.kin.cube_adr[name]
+    yaw = np.radians(deg)
+    sim.data.qpos[a + 3:a + 7] = (np.cos(yaw / 2), 0, 0, np.sin(yaw / 2))
+    mujoco.mj_forward(sim.model, sim.data)
+
+
+def test_rotated_cube_is_gripped_on_its_faces(robot):
+    with PandaSim(robot) as sim:
+        _turn(sim, "red_cube", 30)
+        res = sim.execute(plan(sim, robot, [pick("red_cube"), place_on("blue_cube")]))
+        assert res.completed, res.message
+        assert "closed at 4.0 cm" in res.outcomes[0].detail
+        gt = sim.ground_truth().objects
+        assert abs(np.degrees(gt["red_cube"].yaw - gt["blue_cube"].yaw)) < 1.5   # stacked square on
+
+
+def test_misaligned_grasp_is_detected(robot):
+    """The belief says the cube is straight, but it is really turned 30 degrees: the plan is valid
+    against the belief, the fingers land on the corners, and the executor reports it."""
+    with PandaSim(robot) as sim:
+        belief = sim.ground_truth()
+        _turn(sim, "red_cube", 30)
+        res = sim.execute(plan(sim, robot, [pick("red_cube"), place_on("blue_cube")], belief))
+        assert not res.completed
+        assert "grasp misaligned" in res.message
+        assert "gripping the corners" in res.outcomes[0].detail
