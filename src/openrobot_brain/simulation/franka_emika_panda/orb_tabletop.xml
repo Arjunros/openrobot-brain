@@ -25,6 +25,7 @@
     <material name="cube_red" rgba="0.86 0.16 0.14 1"/>
     <material name="cube_green" rgba="0.16 0.66 0.25 1"/>
     <material name="cube_blue" rgba="0.15 0.35 0.85 1"/>
+    <material name="obstacle" rgba="0.36 0.38 0.42 1" specular="0.1"/>
   </asset>
 
   <default>
@@ -56,6 +57,21 @@
     <body name="blue_cube" pos="0.45 -0.15 0.02">
       <freejoint name="blue_cube"/>
       <geom class="cube" material="cube_blue"/>
+    </body>
+
+    <!-- Fixed obstacles, 16 cm tall: tall enough to block the robot's 16 cm carrying height (so it must
+         go around or over), low enough to clear the Panda's forearm when gripping a cube right beside them.
+         Mocap bodies: code places them per scene; physics never moves them.
+         Unused ones are parked far off the table. Sizes must match OBSTACLE_SPECS in scenes.py
+         (a test checks this). -->
+    <body name="obstacle_wall" mocap="true" pos="5 5 0.08">
+      <geom name="wall" type="box" size="0.10 0.02 0.08" material="obstacle"/>
+    </body>
+    <body name="obstacle_post_a" mocap="true" pos="5 6 0.08">
+      <geom name="post_a" type="cylinder" size="0.025 0.08" material="obstacle"/>
+    </body>
+    <body name="obstacle_post_b" mocap="true" pos="5 7 0.08">
+      <geom name="post_b" type="cylinder" size="0.025 0.08" material="obstacle"/>
     </body>
   </worldbody>
 </mujoco>

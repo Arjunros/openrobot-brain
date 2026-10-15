@@ -20,10 +20,12 @@ from ..safety import ValidatedPlan
 from ..world import WorldObject, WorldState, wrap_square
 from . import CUBE_BODIES, DEFAULT_SCENE
 from .camera import CameraModel
-from .kinematics import Kinematics, SceneError, load_model
+from ..scenes import SCENES, Scene, get_scene
+from .kinematics import Kinematics, SceneError, load_model, place_obstacles
 
 # (x, y, yaw): metres, metres, radians
-DEFAULT_LAYOUT = {"red_cube": (0.45, 0.15, 0.0), "green_cube": (0.60, 0.0, 0.0), "blue_cube": (0.45, -0.15, 0.0)}
+DEFAULT_LAYOUT = SCENES["default"].layout
+OBSTACLE_MARGIN_M = 0.10   # cubes start at least this far from an obstacle's footprint (room for the hand + clearance)
 IMAGE_W, IMAGE_H = 640, 480
 
 
@@ -51,16 +53,20 @@ class RoundResult:
     sim_time_s: float = 0.0
 
 
-def random_layout(seed: int, robot: RobotConfig, min_gap: float = 0.09) -> dict[str, tuple[float, float, float]]:
-    """Random (x, y, yaw) per cube. Positions are drawn exactly as before, so a seed keeps its layout;
-    the yaw is drawn afterwards from the same generator."""
+def random_layout(seed: int, robot: RobotConfig, min_gap: float = 0.09,
+                  scene: Scene | None = None) -> dict[str, tuple[float, float, float]]:
+    """Random (x, y, yaw) per cube, clear of each other and of the scene's obstacles.
+    Without obstacles the draws are exactly as before, so a seed keeps its layout; the yaw is
+    drawn afterwards from the same generator."""
+    obstacles = list(scene.obstacles.values()) if scene else []
     rng = np.random.default_rng(seed)
     ws = robot.workspace
     placed: dict[str, tuple[float, float]] = {}
     for name in CUBE_BODIES:
         for _ in range(500):
             p = (float(rng.uniform(ws.x[0] + 0.04, ws.x[1] - 0.04)), float(rng.uniform(ws.y[0] + 0.04, ws.y[1] - 0.04)))
-            if all(math.dist(p, q) >= min_gap for q in placed.values()):
+            if all(math.dist(p, q) >= min_gap for q in placed.values()) and all(
+                    o.footprint_distance(*p) >= OBSTACLE_MARGIN_M for o in obstacles):
                 placed[name] = (round(p[0], 3), round(p[1], 3))
                 break
         else:  # pragma: no cover
@@ -72,7 +78,7 @@ class PandaSim:
     """Use as a context manager."""
 
     def __init__(self, robot: RobotConfig, xml_path: str | Path = DEFAULT_SCENE, headless: bool = True,
-                 speed: float = 1.0):
+                 speed: float = 1.0, scene: str | Scene = "default"):
         if not (0.05 <= speed <= 10):
             raise ValueError("speed must be between 0.05 and 10")
         self.robot = robot
@@ -89,6 +95,7 @@ class PandaSim:
         self.viewer_error: str | None = None
         self.camera: CameraModel | None = None
         self.recorder = None
+        self.scene: Scene = get_scene(scene) if isinstance(scene, str) else scene
         self._frame_every = 1
         self._step_count = 0
         self.reset()
@@ -161,14 +168,19 @@ class PandaSim:
                 self._renderer = None
 
     # -- state ------------------------------------------------------------------
-    def reset(self, layout: dict[str, tuple[float, float, float]] | None = None) -> None:
-        layout = layout or DEFAULT_LAYOUT
+    def reset(self, layout: dict[str, tuple[float, float, float]] | None = None,
+              scene: str | Scene | None = None) -> None:
+        """Start a scene: obstacles from its map, cubes from `layout` (default: the scene's own)."""
+        if scene is not None:
+            self.scene = get_scene(scene) if isinstance(scene, str) else scene
+        layout = layout or self.scene.layout
         m, d, k = self.model, self.data, self.kin
         mujoco.mj_resetData(m, d)
         d.qpos[k.qadr] = self.robot.rest_pose
         d.qpos[k.finger_adr] = 0.04
         d.ctrl[:7] = self.robot.rest_pose
         d.ctrl[7] = self.robot.gripper_open_ctrl
+        place_obstacles(m, d, self.scene.obstacles)
         for name in CUBE_BODIES:
             x, y, yaw = layout[name]
             a = k.cube_adr[name]
@@ -194,7 +206,7 @@ class PandaSim:
         return self.data.site_xpos[self.kin.tcp].copy()
 
     def ground_truth(self) -> WorldState:
-        w = WorldState(cube_size=self.robot.cube_size_m)
+        w = WorldState(cube_size=self.robot.cube_size_m, obstacles=dict(self.scene.obstacles))
         tcp = self.tcp()
         for name in CUBE_BODIES:
             a = self.kin.cube_adr[name]

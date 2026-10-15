@@ -1,4 +1,4 @@
-﻿# OpenRobot-Brain
+# OpenRobot-Brain
 
 **GPT-6 Astra looks at a table through a camera, plans pick-and-place for a Franka Panda, and local code checks every motion before the robot moves.**
 
@@ -28,7 +28,8 @@ camera ─▶ GPT-6 Astra ─▶ pixels → metres ─▶ skills → joint traje
 ## Honest scope
 
 - Simulation only (MuJoCo). There is no code path to real hardware.
-- Objects are 4 cm cubes; the gripper always points straight down.
+- Optional fixed obstacles (`--scene wall` or `--scene posts`, 16 cm tall) come from a known map, like a robot cell's fixtures. The robot routes around or over them on its own and keeps 1.5 cm of clearance; only the cubes are perceived.
+- Objects are 4 cm cubes. They can sit at any angle (`--seed N` gives random positions and angles): the model reads each cube's angle from the image, and the gripper turns to grip it square-on. The gripper always points straight down.
 - GPT-6 Astra is the only AI planner. The `--offline` planner is a short script for demos and tests, and it is labelled as such everywhere.
 - **First live result (one run, not a benchmark):** GPT-6 Astra (`effort=low`) located all three visible cubes from the overhead image to within **0.0–0.2 cm** of ground truth and completed "stack the red cube on the blue cube" in 3 rounds (one round was an invalid response, rejected and fed back). The partly hidden base cube was estimated within 1.9 cm. Every run prints these errors, so you can check them yourself.
 - The vision pipeline is also tested offline with a stand-in "model" that finds colour blobs in the rendered image.
@@ -68,9 +69,11 @@ orb run "unsafe demo" --offline --execute                         # rejected eve
 # GPT-6 Astra with vision
 orb run "stack the red cube on the blue cube"                     # plan + validate round 1 only (dry run)
 orb run "stack the red cube on the blue cube" --execute           # closed loop in the MuJoCo viewer
-orb run "build a tower with blue at the bottom" --execute --seed 7 # random cube layout
+orb run "build a tower with blue at the bottom" --execute --seed 7 # random positions and angles
 orb run "pick up the purple cube" --execute                       # expect: NOT FEASIBLE
 orb run "stack red on blue" --no-vision --execute                 # model gets positions instead of an image
+orb run "build a tower" --scene wall --execute                     # a wall in the way: around or over it
+orb run "build a tower" --scene posts --seed 4 --execute           # posts + random cube layout
 
 # Recording and presentation
 orb run "build a tower" --execute --hold --speed 0.5              # keep the window open, slow motion
@@ -89,7 +92,8 @@ orb snapshot --seed 7                                             # save overhea
 | `--no-vision` | send object positions as text instead of an image |
 | `--effort low…max` | Astra reasoning effort (default `low`) |
 | `--rounds N` | round limit (cap 8) |
-| `--seed N` | random cube layout |
+| `--seed N` | random cube positions and angles |
+| `--scene wall\|posts` | fixed obstacles on the table (default: none) |
 | `--offline` | scripted demo planner, no API |
 
 Exit codes: `0` done or dry run, `2` rejected by safety, `3` planner/API error, `4` simulation error, `5` not completed (infeasible or round limit).

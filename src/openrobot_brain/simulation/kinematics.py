@@ -5,6 +5,7 @@ Nothing here steps physics or touches the simulation that the executor runs.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +20,8 @@ from . import CUBE_BODIES, DEFAULT_SCENE, ROBOT_BODIES
 # fingers closing along world x. (Measured at the ready pose.)
 R_DOWN = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]])
 _PARK = np.array([5.0, 5.0, 0.02])  # where unused cube bodies go in collision checks
+_OBSTACLE_PARK_Y = 10.0             # unused obstacles are parked far off the table
+OBSTACLE_CLEARANCE_M = 0.015        # the arm and anything it carries must stay this far from fixed obstacles
 
 
 def rot_z(a: float) -> np.ndarray:
@@ -38,6 +41,27 @@ def tcp_yaw(R: np.ndarray) -> float:
     """Gripper yaw from a TCP rotation matrix: the angle of the finger-closing axis
     (the TCP's y-axis) in the table plane. Inverse of grasp_rotation for a downward gripper."""
     return float(np.arctan2(R[1, 1], R[0, 1]))
+
+
+def place_obstacles(m: mujoco.MjModel, d: mujoco.MjData, obstacles) -> dict[int, str]:
+    """Put each obstacle's mocap body where the map says and park the rest.
+    Returns {body id: obstacle id} for the ones placed."""
+    from ..scenes import OBSTACLE_SPECS
+    placed: dict[int, str] = {}
+    for i, (oid, spec) in enumerate(OBSTACLE_SPECS.items()):
+        bid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, spec["body"])
+        if bid < 0:
+            raise SceneError(f"scene is missing obstacle body {spec['body']!r}")
+        mid = m.body_mocapid[bid]
+        o = obstacles.get(oid)
+        if o is None:
+            d.mocap_pos[mid] = (5.0 + i, _OBSTACLE_PARK_Y, spec["half"][2])
+            d.mocap_quat[mid] = (1, 0, 0, 0)
+        else:
+            d.mocap_pos[mid] = (o.x, o.y, o.half[2])
+            d.mocap_quat[mid] = yaw_quat(o.yaw)
+            placed[bid] = oid
+    return placed
 
 
 def yaw_quat(yaw: float) -> tuple[float, float, float, float]:
@@ -68,7 +92,8 @@ class IKResult:
 
 class Kinematics:
     def __init__(self, model: mujoco.MjModel, robot: RobotConfig):
-        self.m = model
+        # A private copy of the model: the clearance margins set below must never reach the physics.
+        self.m = model = copy.deepcopy(model)
         self.d = mujoco.MjData(model)
         self.robot = robot
         jid = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, j) for j in robot.joint_names]
@@ -90,6 +115,16 @@ class Kinematics:
             self.cube_geom[name] = b
         self.robot_bodies = {mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, b) for b in ROBOT_BODIES}
         self.floor_geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+        # Fixed obstacles get a contact margin, so anything closer than the clearance counts as a hit.
+        # (Physics lags its commands slightly and a held cube can swing; touching distance is not enough.)
+        from ..scenes import OBSTACLE_SPECS
+        self.obstacle_geoms = set()
+        for spec in OBSTACLE_SPECS.values():
+            bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, spec["body"])
+            for g in range(model.ngeom):
+                if model.geom_bodyid[g] == bid:
+                    model.geom_margin[g] = OBSTACLE_CLEARANCE_M
+                    self.obstacle_geoms.add(g)
         self.lo, self.hi = robot.lower(), robot.upper()
         self._jp = np.zeros((3, model.nv))
         self._jr = np.zeros((3, model.nv))
@@ -108,7 +143,10 @@ class Kinematics:
            iters: int = 200, posture_gain: float = 0.05) -> IKResult:
         """Damped least squares with null-space pull toward the ready pose. Joint limits are clamped."""
         q = np.clip(q_seed.astype(float).copy(), self.lo, self.hi)
-        ready = self.robot.ready_pose
+        # Posture the redundancy settles toward: the ready pose, with the base joint turned to face the
+        # target, so the whole arm (elbow, forearm) leans toward it instead of reaching across the table.
+        ready = self.robot.ready_pose.copy()
+        ready[0] = np.clip(np.arctan2(p_target[1], p_target[0]), self.lo[0], self.hi[0])
         ep = er = np.zeros(3)
         for _ in range(iters):
             self._set_arm(q)
@@ -163,11 +201,13 @@ class Kinematics:
                 self.d.qpos[adr + 3:adr + 7] = yaw_quat(yaw)
             else:
                 self.d.qpos[adr + 3:adr + 7] = (1, 0, 0, 0)
+        obstacle_bodies = place_obstacles(self.m, self.d, world.obstacles)
         mujoco.mj_fwdPosition(self.m, self.d)
 
         out: list[tuple[str, str]] = []
         for c in self.d.contact[: self.d.ncon]:
-            if c.dist > 0:
+            near_obstacle = c.geom1 in self.obstacle_geoms or c.geom2 in self.obstacle_geoms
+            if c.dist > 0 and not near_obstacle:   # obstacle contacts within the clearance count
                 continue
             names = []
             for g in (c.geom1, c.geom2):
@@ -178,6 +218,8 @@ class Kinematics:
                     names.append("robot")
                 elif b in body_to_obj:
                     names.append(body_to_obj[b])
+                elif b in obstacle_bodies:
+                    names.append(obstacle_bodies[b])
                 else:
                     names.append("other")
             a, b = names

@@ -6,6 +6,7 @@
     orb run "stack red on blue" --no-vision --execute          # model gets object positions, no image
     orb run "build a tower" --execute --headless --record tower.mp4   # captioned video for sharing
     orb run "build a tower" --offline --execute                # scripted demo, no API key
+    orb run "stack red on blue" --scene wall --execute         # a wall in the way: the arm goes around or over
     orb snapshot --seed 3                                      # save camera images of a layout
     orb sim-check
 """
@@ -19,6 +20,7 @@ from typing import Sequence
 
 from . import __version__
 from .config import PANDA
+from .scenes import SCENES
 
 EXIT_OK, EXIT_REJECTED, EXIT_PLANNER, EXIT_SIM, EXIT_NOT_DONE = 0, 2, 3, 4, 5
 DEMOS = {
@@ -26,6 +28,8 @@ DEMOS = {
     "pick up the green cube": "single pick",
     "build a tower": "three-cube tower over several closed-loop rounds",
     "unsafe demo": "carries a cube off the table; the validator rejects it every round",
+    "stack the red cube on the blue cube --scene wall": "a 16 cm wall in the way: the arm routes around or over it",
+    "build a tower --scene posts": "two posts between the cubes",
 }
 
 
@@ -47,13 +51,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Astra reasoning effort")
     sp.add_argument("--model", default=None, help="model ID (default: $OPENAI_MODEL or gpt-6-astra)")
     sp.add_argument("--rounds", type=int, default=None, help=f"max rounds (cap {PANDA.safety.max_rounds})")
-    sp.add_argument("--seed", type=int, default=None, help="random cube layout (default: fixed layout)")
+    sp.add_argument("--seed", type=int, default=None, help="random cube layout (default: the scene's own)")
+    sp.add_argument("--scene", choices=list(SCENES), default="default",
+                    help="fixed obstacles on the table: " + "; ".join(f"{k} = {v.description}" for k, v in SCENES.items()))
     sp.add_argument("--save-images", type=Path, default=None, help="save each round's camera image here")
     sp.add_argument("--record", type=Path, default=None,
                     help="render a captioned video of the run (.mp4 needs the [video] extra, .gif works anywhere)")
 
     sp = sub.add_parser("snapshot", help="save overhead and front camera images of the scene")
     sp.add_argument("--seed", type=int, default=None)
+    sp.add_argument("--scene", choices=list(SCENES), default="default")
     sp.add_argument("--out", type=Path, default=Path("snapshots"))
 
     sub.add_parser("sim-check", help="load the scene and run a headless pick-and-place smoke test")
@@ -82,9 +89,9 @@ def _cmd_run(args) -> int:
 
     headless = args.headless or not args.execute
     try:
-        with PandaSim(PANDA, headless=headless, speed=args.speed) as sim:
+        with PandaSim(PANDA, headless=headless, speed=args.speed, scene=args.scene) as sim:
             if args.seed is not None:
-                sim.reset(random_layout(args.seed, PANDA))
+                sim.reset(random_layout(args.seed, PANDA, scene=sim.scene))
             if sim.viewer_error:
                 print(f"Note: {sim.viewer_error}")
             if args.record:
@@ -126,7 +133,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.cmd == "demos":
         for k, v in DEMOS.items():
-            print(f'  orb run "{k}" --offline --execute    # {v}')
+            task, _, flags = k.partition(" --")
+            extra = f" --{flags}" if flags else ""
+            print(f'  orb run "{task}"{extra} --offline --execute    # {v}')
         return EXIT_OK
 
     if args.cmd == "sim-check":
@@ -146,9 +155,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.cmd == "snapshot":
         from .simulation.executor import PandaSim, VisionUnavailable, random_layout
         try:
-            with PandaSim(PANDA) as sim:
+            with PandaSim(PANDA, scene=args.scene) as sim:
                 if args.seed is not None:
-                    sim.reset(random_layout(args.seed, PANDA))
+                    sim.reset(random_layout(args.seed, PANDA, scene=sim.scene))
                 args.out.mkdir(parents=True, exist_ok=True)
                 for cam in ("overhead", "front"):
                     path = args.out / f"{cam}.png"

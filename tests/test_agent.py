@@ -44,6 +44,44 @@ def test_vision_closed_loop_stacks_cube(sim, robot):
     assert len(errors) == 3 and max(errors) < 1.0
 
 
+def test_vision_reads_cube_angles_and_grips_rotated_cubes(robot):
+    """Rotated layout, seen only through the camera: the 'model' reports each cube's angle from
+    the image, the gripper turns to match, and the stack lines up."""
+    from openrobot_brain.simulation.executor import random_layout
+    with PandaSim(robot) as sim:
+        try:
+            sim.render()
+        except VisionUnavailable as exc:
+            pytest.skip(str(exc))
+        sim.reset(random_layout(3, robot))
+        outcome, log = run(sim, robot, AstraPlanner(robot, vision=True, client=FakeVisionClient()),
+                           "stack the red cube on the blue cube")
+        assert outcome.status == "done", log
+        assert stacked(sim, "red_cube", "blue_cube")
+        assert "closed at 4.0 cm" in log
+        yaw_errors = [p["yaw_error_deg"] for p in outcome.history[0]["perception"]]
+        assert max(yaw_errors) < 2.0, yaw_errors
+
+
+def test_ignoring_cube_angles_is_caught_and_reported(robot):
+    """If the model reports every cube as straight, the grip lands on the corners: the executor
+    flags 'grasp misaligned' and that failure is fed back to the model in the next round."""
+    from openrobot_brain.simulation.executor import random_layout
+    with PandaSim(robot) as sim:
+        try:
+            sim.render()
+        except VisionUnavailable as exc:
+            pytest.skip(str(exc))
+        layout = random_layout(3, robot)
+        layout["red_cube"] = (*layout["red_cube"][:2], np.radians(35))
+        sim.reset(layout)
+        client = FakeVisionClient(report_yaw=False)
+        outcome, log = run(sim, robot, AstraPlanner(robot, vision=True, client=client),
+                           "stack the red cube on the blue cube", max_rounds=2)
+        assert "grasp misaligned" in log
+        assert "gripping the corners" in client.calls[1]["input"][0]["content"][0]["text"]
+
+
 def test_closed_loop_recovers_from_bad_perception(sim, robot):
     """Round 1: the 'model' misreads red's position by 60 px -> grasp misses.
     The failure is reported back, round 2 retries from a fresh image and succeeds."""

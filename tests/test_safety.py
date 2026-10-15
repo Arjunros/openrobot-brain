@@ -66,21 +66,57 @@ def test_held_object_collision_is_caught(robot, kin):
 
 
 def test_arm_collision_with_object_is_caught(robot, kin):
-    # fingers close along world x; a neighbouring cube 5.5 cm away in x sits where an open finger descends
-    w = make_world(red_cube=(0.45, 0.15, 0.02), blue_cube=(0.395, 0.15, 0.02))
-    with pytest.raises(SafetyError, match="arm would hit 'blue_cube'"):
+    """Neighbours 5.5 cm away on two sides: every one of the four grasps puts an open
+    finger into a cube, so the validator must reject the pick."""
+    w = make_world(red_cube=(0.45, 0.15, 0.02), blue_cube=(0.395, 0.15, 0.02), green_cube=(0.45, 0.095, 0.02))
+    with pytest.raises(SafetyError, match="arm would hit"):
         check(robot, kin, [pick("red_cube")], w)
 
 
+def test_grasp_choice_turns_to_avoid_a_neighbour(robot, kin):
+    """One neighbour 5.5 cm away along x blocks the straight grasp (fingers close along x).
+    The skill picks the grasp turned 90 degrees instead, and the validator accepts it."""
+    from openrobot_brain.simulation.kinematics import tcp_yaw
+    w = make_world(red_cube=(0.45, 0.15, 0.02), blue_cube=(0.395, 0.15, 0.02))
+    vp = check(robot, kin, [pick("red_cube")], w)
+    grasp = next(s for s in vp.segments if s.label == "close gripper")
+    yaw = np.degrees(tcp_yaw(kin.fk(grasp.q[0])[1]))
+    assert abs(abs(yaw) - 90) < 2, yaw
+
+
 def test_collision_check_uses_object_rotation(robot, kin):
-    """8.6 cm away, a straight neighbour clears the open fingers, but the same cube
-    turned 45 degrees pokes a corner into their path. The validator must see the turn."""
+    """At the grasp pose, a straight neighbour 8.6 cm away clears the open fingers, but the
+    same cube turned 45 degrees pokes a corner into them. The contact check must see the turn."""
+    q = kin.ik(np.array([0.45, 0.15, 0.02]), robot.ready_pose).q
     straight = make_world(red_cube=(0.45, 0.15, 0.02), blue_cube=(0.364, 0.15, 0.02))
-    check(robot, kin, [pick("red_cube")], straight)
     turned = straight.copy()
     turned.objects["blue_cube"].yaw = np.pi / 4
-    with pytest.raises(SafetyError, match="arm would hit 'blue_cube'"):
-        check(robot, kin, [pick("red_cube")], turned)
+
+    def hits_blue(w):
+        return any("blue_cube" in pair for pair in kin.contacts(q, True, w))
+    assert not hits_blue(straight)
+    assert hits_blue(turned)
+
+
+def test_world_copy_keeps_yaw():
+    w = make_world()
+    w.objects["red_cube"].yaw = 0.5
+    assert w.copy().objects["red_cube"].yaw == 0.5      # the safety check works on copies
+
+
+def test_rotated_cube_is_gripped_square_on(robot, kin):
+    """The planned grasp turns the gripper to the cube's own angle (or 90 degrees from it),
+    and a cube placed on another ends up lined up with it."""
+    from openrobot_brain.simulation.kinematics import tcp_yaw
+    from openrobot_brain.world import wrap_square
+    w = make_world()
+    w.objects["red_cube"].yaw = np.radians(30)
+    w.objects["blue_cube"].yaw = np.radians(-20)
+    vp = check(robot, kin, [pick("red_cube"), place_on("blue_cube")], w)
+    grasp = next(s for s in vp.segments if s.label == "close gripper")
+    assert abs(np.degrees(wrap_square(tcp_yaw(kin.fk(grasp.q[0])[1]) - np.radians(30)))) < 1
+    end = vp.world_end.objects
+    assert abs(np.degrees(wrap_square(end["red_cube"].yaw - end["blue_cube"].yaw))) < 1
 
 
 def test_grasp_rotation():

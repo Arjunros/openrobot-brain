@@ -47,8 +47,12 @@ def _fmt_action(a) -> str:
 
 
 def build_prompt(task: str, rnd: int, max_rounds: int, vision: bool, belief_text: str | None,
-                 held_note: str, history: list[dict[str, Any]]) -> str:
+                 held_note: str, history: list[dict[str, Any]], obstacles_text: str | None = None) -> str:
     lines = [f"TASK: {task}", f"ROUND {rnd} of at most {max_rounds}.", f"GRIPPER: {held_note}"]
+    if obstacles_text:
+        lines.append("\nFIXED OBSTACLES (from the cell map, not the camera; the robot routes around or over them "
+                     "by itself; do not list them in observations; never pick them, place on them, or place a "
+                     "cube within 8 cm of them):\n" + obstacles_text)
     if history:
         lines.append("\nWHAT HAPPENED SO FAR:")
         for h in history[-4:]:
@@ -101,7 +105,9 @@ def run_agent(task: str, planner: Planner, sim: PandaSim, robot: RobotConfig, *,
             held_belief = None
         held_note = (f"holding {held_belief.id} (out of view)" if (vision and held_belief) else
                      f"holding {truth.held}" if (not vision and truth.held) else "empty")
-        prompt = build_prompt(task, rnd, max_rounds, vision, None if vision else truth.describe(), held_note, history)
+        obstacles_text = truth.describe_obstacles() if truth.obstacles else None   # the map, known in advance
+        prompt = build_prompt(task, rnd, max_rounds, vision, None if vision else truth.describe(), held_note,
+                              history, obstacles_text)
         rin = RoundInput(task, rnd, max_rounds, prompt, img_png, truth, history)
 
         t0 = time.perf_counter()
@@ -132,17 +138,21 @@ def run_agent(task: str, planner: Planner, sim: PandaSim, robot: RobotConfig, *,
 
         # Belief about the world
         if vision:
-            belief, warns = perceive(list(resp.observations), sim.camera, robot.cube_size_m, held_belief)
+            belief, warns = perceive(list(resp.observations), sim.camera, robot.cube_size_m, held_belief,
+                                     obstacles=truth.obstacles)
             for w in warns:
                 say(f"  perception warning: {w}")
             scores = score_perception(belief, truth)
             if scores:
                 say("Perception (model's pixel estimate → metres, checked against simulator truth):")
                 for s in scores:
-                    ok = "✓" if s.label_ok and s.error_cm is not None and s.error_cm < 2.5 else "✗"
-                    o = belief.objects[s.id].pos
-                    say(f"  {ok} {s.id:<12} '{s.label}' at ({o[0]:.3f}, {o[1]:+.3f}, {o[2]:.3f})"
-                        f"  error {s.error_cm} cm vs {s.matched}")
+                    good = (s.label_ok and s.error_cm is not None and s.error_cm < 2.5
+                            and s.yaw_error_deg is not None and s.yaw_error_deg < 8)
+                    obj = belief.objects[s.id]
+                    o = obj.pos
+                    say(f"  {'✓' if good else '✗'} {s.id:<12} '{s.label}' at ({o[0]:.3f}, {o[1]:+.3f}, {o[2]:.3f})"
+                        f" turned {np.degrees(obj.yaw):+5.1f}°  error {s.error_cm} cm / {s.yaw_error_deg}°"
+                        f" vs {s.matched}")
             entry["perception"] = [s.__dict__ for s in scores]
         else:
             belief = truth

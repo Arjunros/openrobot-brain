@@ -25,13 +25,28 @@ THRESH = {
 
 
 def find_blobs(png: bytes) -> dict[str, tuple[float, float]]:
+    return {c: (u, v) for c, (u, v, _) in find_blobs_with_yaw(png).items()}
+
+
+def square_yaw_deg(xs: np.ndarray, ys: np.ndarray) -> float:
+    """Edge angle of a square blob, counter-clockwise as seen in the image, in [-45, 45).
+
+    A square has no long axis, so a covariance/PCA angle is meaningless. Instead use the
+    4-fold moment sum(r^4 e^{4i phi}): its angle points at the corners (45 degrees off the edges)."""
+    du, up = xs - xs.mean(), -(ys - ys.mean())         # image v grows downward
+    r2, phi = du * du + up * up, np.arctan2(up, du)
+    yaw = np.angle(np.sum(r2 * r2 * np.exp(4j * phi))) / 4 - np.pi / 4
+    return float(np.degrees((yaw + np.pi / 4) % (np.pi / 2) - np.pi / 4))
+
+
+def find_blobs_with_yaw(png: bytes) -> dict[str, tuple[float, float, float]]:
     img = np.asarray(Image.open(io.BytesIO(png)).convert("RGB")).astype(int)
     r, g, b = img[..., 0], img[..., 1], img[..., 2]
     out = {}
     for color, f in THRESH.items():
         ys, xs = np.nonzero(f(r, g, b))
         if xs.size > 30:
-            out[color] = (float(xs.mean()) + 0.5, float(ys.mean()) + 0.5)
+            out[color] = (float(xs.mean()) + 0.5, float(ys.mean()) + 0.5, square_yaw_deg(xs, ys))
     return out
 
 
@@ -48,11 +63,13 @@ class FakeVisionClient:
     ``bias_px`` shifts reported u on the first pick attempt, to simulate a perception error.
     """
 
-    def __init__(self, bias_px: float = 0.0):
+    def __init__(self, bias_px: float = 0.0, report_yaw: bool = True):
         self.calls: list[dict] = []
         self.bias_px = bias_px
+        self.report_yaw = report_yaw
         self.responses = SimpleNamespace(create=self.create)
         self._base_px: tuple[float, float] | None = None
+        self._base_yaw = 0.0
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
@@ -60,15 +77,20 @@ class FakeVisionClient:
         assert png is not None, "vision request without an image"
         prompt = kwargs["input"][0]["content"][0]["text"]
         a, b = re.findall(r"\b(red|green|blue)\b", prompt.split("\n")[0])[:2]
-        blobs = find_blobs(png)
+        blobs3 = find_blobs_with_yaw(png)
+        blobs = {c: (u, v) for c, (u, v, _) in blobs3.items()}
         obs = []
-        for color, (u, v) in blobs.items():
+        for color, (u, v, yaw) in blobs3.items():
             if color == a and self.bias_px and len(self.calls) == 1:
                 u += self.bias_px
-            obs.append({"id": f"{color}_cube", "label": f"{color} cube", "u": u, "v": v, "on_top_of": ""})
+            if not self.report_yaw:
+                yaw = 0.0
+            obs.append({"id": f"{color}_cube", "label": f"{color} cube", "u": u, "v": v, "yaw_deg": yaw,
+                        "on_top_of": ""})
 
         if b in blobs and self._base_px is None:
             self._base_px = blobs[b]          # remember where the base cube sits before stacking
+            self._base_yaw = blobs3[b][2] if self.report_yaw else 0.0
         # After stacking, the base cube's side faces can still show at the edges, so judge by whether
         # the top cube now sits where the base cube was.
         stacked = (a in blobs and self._base_px is not None
@@ -76,7 +98,7 @@ class FakeVisionClient:
         if stacked:
             obs = [o for o in obs if o["id"] != f"{b}_cube"]
             obs.append({"id": f"{b}_cube", "label": f"{b} cube", "u": self._base_px[0], "v": self._base_px[1],
-                        "on_top_of": ""})
+                        "yaw_deg": self._base_yaw, "on_top_of": ""})
             for o in obs:
                 if o["id"] == f"{a}_cube":
                     o["on_top_of"] = f"{b}_cube"

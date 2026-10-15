@@ -56,6 +56,7 @@ class SafetyLimits:
     max_wait_s: float = 3.0
     max_round_motion_s: float = 60.0
     place_clearance_m: float = 0.06            # free space required around a place_at target
+    obstacle_place_clearance_m: float = 0.08   # place_at targets this far from fixed obstacles (room for the hand)
     max_stack_height: int = 3
     tracking_abort_rad: float = 0.12           # executor stops if the arm lags this far behind
 

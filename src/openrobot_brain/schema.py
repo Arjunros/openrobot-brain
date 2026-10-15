@@ -5,7 +5,7 @@ Each round the model returns:
     {
       "status": "act" | "done" | "infeasible",
       "message": "...",
-      "observations": [{"id", "label", "u", "v", "on_top_of"}],   # vision mode
+      "observations": [{"id", "label", "u", "v", "yaw_deg", "on_top_of"}],   # vision mode
       "actions": [ pick | place_on | place_at | move_to | go_home | wait ]
     }
 
@@ -73,6 +73,7 @@ class Observation(_Strict):
     label: Annotated[str, Field(min_length=1, max_length=80)]
     u: FiniteFloat
     v: FiniteFloat
+    yaw_deg: FiniteFloat = 0.0      # top-face edge angle in the image, counter-clockwise; folded locally
     on_top_of: Annotated[str, Field(max_length=24)] = ""
 
 
@@ -142,7 +143,7 @@ def response_json_schema() -> dict[str, Any]:
     return _obj({
         "status": {"type": "string", "enum": ["act", "done", "infeasible"]},
         "message": s,
-        "observations": {"type": "array", "items": _obj({"id": s, "label": s, "u": n, "v": n, "on_top_of": s})},
+        "observations": {"type": "array", "items": _obj({"id": s, "label": s, "u": n, "v": n, "yaw_deg": n, "on_top_of": s})},
         "actions": {"type": "array", "items": {"anyOf": [
             act("pick", object=s),
             act("place_on", object=s),

@@ -85,6 +85,9 @@ List every object you can see in `observations`:
       keep ids stable across rounds
   label: 2-4 words, colour + shape, at most 80 characters (e.g. "red cube")
   u, v: pixel centre of the object's visible TOP face, as precisely as you can
+  yaw_deg: how far the top face's edges are turned from the image's horizontal, in degrees,
+      counter-clockwise as you look at the image (positive = turned anticlockwise), between -45 and 45.
+      0 means the edges line up with the image borders. The gripper turns to match this angle.
   on_top_of: id of the object it rests on, or "" if it is on the table
 The robot converts your pixel coordinates to metres itself. Refer to objects by id in actions.
 The arm is parked out of view while the photo is taken; an object held in the gripper is not visible."""
@@ -100,6 +103,10 @@ WORLD FRAME (metres): robot base at the origin, +x away from the robot, +y to th
 table surface at z = 0. Reachable area: x {ws.x[0]}..{ws.x[1]}, y {ws.y[0]}..{ws.y[1]}.
 
 {perception}
+
+Some scenes have FIXED OBSTACLES (walls, posts). Their positions come from the cell map and are listed in
+each round's message. The robot plans routes around or over them by itself; just never pick them, place on
+them, or put a cube within 8 cm of them.
 
 ACTIONS (the only ones that exist):
   pick {{object}}            grasp an object from above. Gripper must be empty; nothing may be on top of it.

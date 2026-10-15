@@ -41,6 +41,7 @@ def test_vision_request_shape(robot):
     for banned in ("temperature", "top_p", "tools", "tool_choice"):
         assert banned not in call
     assert "PERCEPTION (vision mode)" in call["instructions"] and "UP is +x" in call["instructions"]
+    assert "yaw_deg" in call["instructions"] and "counter-clockwise" in call["instructions"]
 
 
 def test_state_mode_sends_no_image(robot):

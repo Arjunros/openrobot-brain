@@ -32,7 +32,7 @@ After 3 consecutive invalid or rejected rounds, or the round limit (8), the loop
 
 ## Perception (`perception.py`, `simulation/camera.py`)
 
-The overhead camera is a fixed pinhole camera (640×480, 38° vertical FOV, 1.2 m above the table, looking straight down). The model reports each object's pixel centre of its visible top face and what it is stacked on. `perceive()` intersects that pixel's viewing ray with the plane at the object's top-face height to get metres. Stack levels come from the `on_top_of` chain; unknown or circular references are warned about and treated as "on the table".
+The overhead camera is a fixed pinhole camera (640×480, 38° vertical FOV, 1.2 m above the table, looking straight down). The model reports each object's pixel centre of its visible top face, the angle of its edges in the image (`yaw_deg`, counter-clockwise; in this camera it equals the world yaw, verified by a test), and what it is stacked on. `perceive()` intersects that pixel's viewing ray with the plane at the object's top-face height to get metres. Stack levels come from the `on_top_of` chain; unknown or circular references are warned about and treated as "on the table".
 
 An object held in the gripper is not visible (the arm parks out of view), so the belief carries it over from the previous round.
 
@@ -42,12 +42,27 @@ An object held in the gripper is not visible (the arm parks out of view), so the
 
 Each action becomes a list of `Segment`s: dense joint waypoints with timestamps, a gripper command, and the predicted world during the segment.
 
-- `pick`: leave the park pose → rise to transit height (16 cm) → move above the object → descend → close the gripper → lift.
+- `pick`: leave the park pose → rise to transit height (16 cm) → move above the object while turning the gripper to the cube's angle → descend → close the gripper → lift.
+- **Grasp choice:** a square can be gripped four ways (every 90°). The skill tries them from the smallest wrist turn to the largest and takes the first that IK can reach and that keeps the open fingers clear of other objects. `place_on` turns the held cube to line up with the base.
 - `place_on` / `place_at`: carry at transit height → descend to 3 mm above the release height → open → retreat.
 - `move_to`: rise → move above → descend.
 - `go_home` and the automatic end of every round: rise → joint-space move to the park pose.
 
-Cartesian segments follow straight lines with a minimum-jerk profile (peak 0.25 m/s in transit, 0.10 m/s vertically), sampled every ~5 mm, with IK chained from the previous sample. IK is damped least squares on position and orientation (gripper straight down) with a null-space pull toward a comfortable posture, clamped to the software joint limits.
+Cartesian segments follow straight lines (turning the gripper gradually when its angle changes) with a minimum-jerk profile (peak 0.25 m/s in transit, 0.10 m/s vertically), sampled every ~5 mm, with IK chained from the previous sample. IK is damped least squares on position and orientation (gripper straight down) with a null-space pull toward a comfortable posture, clamped to the software joint limits.
+
+## Obstacles and routing (`scenes.py`, `skills.py`)
+
+Scenes (`default`, `wall`, `posts`) define fixed obstacles and a starting cube layout. Obstacles are mocap bodies in `orb_tabletop.xml`, placed by code and never moved by physics; unused ones are parked off the table. They are part of the robot's belief from the map, not from the camera, and are listed in every prompt.
+
+`travel()` moves at transit height and asks `_route()` for waypoints. Candidates, tried shortest first:
+
+1. straight to the goal;
+2. **around**: via one or two corners of an obstacle's footprint, pushed out by 10 cm;
+3. **over**: up to 14 or 22 cm above the tallest obstacle, across, and back down.
+
+Each candidate is screened by sampling it every 1 cm (IK reachable, no contact within the clearance) and the first that passes is expanded into normal segments, which the validator then checks in full. With no obstacles, the straight line is used without screening.
+
+Cartesian segments are **time-scaled**: if any joint would exceed 90% of the speed limit (it happens near the workspace edge, where a slow hand can still mean fast joints), the segment is stretched.
 
 ## Safety (`safety.py`)
 

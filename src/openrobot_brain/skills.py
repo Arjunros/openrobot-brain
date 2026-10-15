@@ -24,6 +24,9 @@ from .simulation.kinematics import Kinematics, grasp_rotation, tcp_yaw
 from .world import WorldState, wrap_square
 
 CART_STEP_M = 0.005
+ROUTE_CHECK_STEP_M = 0.01      # sample spacing when screening candidate routes
+AROUND_MARGIN_M = 0.10         # waypoints this far outside an obstacle's footprint (room for the hand)
+OVER_CLEARANCE_M = (0.14, 0.22)  # fingertip heights above the tallest obstacle when going over
 JOINT_STEP_RAD = 0.02
 MIN_SEG_S = 0.3
 
@@ -86,7 +89,15 @@ class SkillExpander:
             qs.append(q)
             targets.append(p)
             errs.append((res.pos_err, res.rot_err))
-        return Segment(idx, label, "cartesian", s * T, np.array(qs), gripper, finger_open, world.copy(),
+        qs = np.array(qs)
+        t = s * T
+        # Time scaling: near the edges of the workspace a slow hand can still mean fast joints.
+        # Stretch the segment so no joint exceeds 90% of the speed limit (the validator checks 100%).
+        cap = 0.9 * self.robot.safety.max_joint_velocity_rad_s
+        peak = float(np.max(np.abs(np.diff(qs, axis=0)) / np.diff(t)[:, None]))
+        if peak > cap:
+            t = t * (peak / cap)
+        return Segment(idx, label, "cartesian", t, qs, gripper, finger_open, world.copy(),
                        tcp_targets=targets, ik_errors=errs, **kw)
 
     def _yaw(self, q) -> float:
@@ -120,6 +131,66 @@ class SkillExpander:
             if ok:
                 return yaw
         return options[0]
+
+    # -- routing around fixed obstacles ---------------------------------------------
+    def _route_ok(self, q0: np.ndarray, waypoints: list[np.ndarray], yaw0: float, yaw1: float,
+                  world: WorldState, finger_open: bool) -> bool:
+        """Screen a candidate route: IK reachable along it and nothing touched on the way
+        (the arm may touch only the object it is holding; the held object touches nothing)."""
+        lim = self.robot.safety
+        p_prev = self._tcp(q0)
+        legs = [np.linalg.norm(w - p) for p, w in zip([p_prev] + waypoints[:-1], waypoints)]
+        total = max(sum(legs), 1e-9)
+        q, done = q0, 0.0
+        for leg, w in zip(legs, waypoints):
+            n = max(2, int(np.ceil(leg / ROUTE_CHECK_STEP_M)))
+            for k in range(1, n + 1):
+                p = p_prev + (w - p_prev) * k / n
+                yaw = yaw0 + (yaw1 - yaw0) * (done + leg * k / n) / total
+                res = self.kin.ik(p, q, grasp_rotation(yaw), iters=60)
+                if res.pos_err > 2 * lim.ik_pos_tol_m or res.rot_err > 2 * lim.ik_rot_tol_rad:
+                    return False
+                q = res.q
+                for a, b in self.kin.contacts(q, finger_open, world):
+                    pair = {a, b}
+                    if pair == {"robot", world.held}:
+                        continue
+                    if "robot" in pair or world.held in pair:
+                        return False
+            done += leg
+            p_prev = w
+        return True
+
+    def _route(self, q0: np.ndarray, goal: np.ndarray, yaw1: float, world: WorldState,
+               finger_open: bool) -> tuple[list[np.ndarray], str]:
+        """Waypoints from the current TCP (at transit height) to `goal` (also at transit height).
+        Tries, shortest first: straight; around an obstacle via one or two of its corners;
+        over the top. Returns the first that is reachable and collision-free. With no obstacles,
+        or if nothing works, returns the straight line (the validator then explains any problem)."""
+        start = self._tcp(q0)
+        if not world.obstacles:
+            return [goal], ""
+        ws, z = self.ws, goal[2]
+        cands: list[tuple[list[np.ndarray], str]] = [([goal], "")]
+        for o in world.obstacles.values():
+            cs = [np.array([cx, cy, z]) for cx, cy in o.corners(AROUND_MARGIN_M) if ws.contains_xy(cx, cy)]
+            cands += [([c, goal], f"around {o.id}") for c in cs]
+            cands += [([c1, c2, goal], f"around {o.id}") for c1 in cs for c2 in cs if c1 is not c2]
+        top = max(o.height for o in world.obstacles.values())
+        for clear in OVER_CLEARANCE_M:
+            zh = top + clear
+            if zh <= ws.tcp_z_max:
+                cands.append(([np.array([start[0], start[1], zh]), np.array([goal[0], goal[1], zh]), goal],
+                              f"over at {zh * 100:.0f} cm"))
+
+        def length(route):
+            pts = [start] + route[0]
+            return sum(np.linalg.norm(b - a) for a, b in zip(pts, pts[1:]))
+        yaw0 = self._yaw(q0)
+        for route in sorted(cands, key=length):
+            if self._route_ok(q0, route[0], yaw0, yaw1, world, finger_open):
+                return route
+        return [goal], ""
 
     def _joint(self, idx, label, q0, q1, world, gripper, finger_open) -> Segment:
         D = float(np.max(np.abs(q1 - q0)))
@@ -174,10 +245,22 @@ class SkillExpander:
                 q = segs[-1].q[-1]
 
         def travel(i, label, x, y, yaw=None):
+            """Move at transit height to above (x, y), routing around or over fixed obstacles."""
             nonlocal q
-            segs.append(self._cartesian(i, label, q, np.array([x, y, ws.transit_z]), world, grip(), open_,
-                                        r.transit_speed_m_s, yaw1=yaw))
-            q = segs[-1].q[-1]
+            goal = np.array([x, y, ws.transit_z])
+            yaw0 = self._yaw(q)
+            yaw1 = yaw0 if yaw is None else yaw
+            waypoints, how = self._route(q, goal, yaw1, world, open_)
+            start = self._tcp(q)
+            pts = [start] + waypoints
+            legs = [np.linalg.norm(b - a) for a, b in zip(pts, pts[1:])]
+            total, done = max(sum(legs), 1e-9), 0.0
+            for leg, w in zip(legs, waypoints):
+                done += leg
+                tag = f"{label} ({how})" if how else label
+                segs.append(self._cartesian(i, tag, q, w, world, grip(), open_, r.transit_speed_m_s,
+                                            yaw1=yaw0 + (yaw1 - yaw0) * done / total))
+                q = segs[-1].q[-1]
 
         held_offset = 0.0  # held object's yaw minus the gripper's (about 0 for an aligned grasp)
 
@@ -242,6 +325,10 @@ class SkillExpander:
                             if np.linalg.norm(o.pos[:2] - np.array([a.x, a.y])) < r.safety.place_clearance_m:
                                 raise SkillError(f"({a.x:.3f}, {a.y:.3f}) is too close to {o.id!r}; need "
                                                  f"{r.safety.place_clearance_m} m clearance")
+                        for ob in world.obstacles.values():
+                            if ob.footprint_distance(a.x, a.y) < r.safety.obstacle_place_clearance_m:
+                                raise SkillError(f"({a.x:.3f}, {a.y:.3f}) is too close to obstacle {ob.id!r}; need "
+                                                 f"{r.safety.obstacle_place_clearance_m} m from it")
                         dest = np.array([a.x, a.y, c / 2])
                         touch = frozenset({world.held})
                         label = f"lower to ({a.x:.2f}, {a.y:.2f})"

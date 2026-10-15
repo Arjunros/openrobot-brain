@@ -117,3 +117,26 @@ def test_wrap_square():
     from openrobot_brain.world import wrap_square
     for given, expected in ((0, 0), (30, 30), (50, -40), (-46, 44), (90, 0), (135, -45)):
         assert np.isclose(np.degrees(wrap_square(np.radians(given))), expected)
+
+
+def test_image_angle_equals_world_yaw(robot):
+    """The convention the prompt gives the model: an edge angle measured counter-clockwise in the
+    overhead image equals the cube's world yaw. Measured here from real renders."""
+    from fakes import find_blobs_with_yaw
+    with PandaSim(robot) as sim:
+        for deg in (-40, -15, 0, 20, 40):
+            sim.reset({"red_cube": (0.45, 0.15, np.radians(deg)), "green_cube": (0.6, 0.0, 0.0),
+                       "blue_cube": (0.45, -0.15, 0.0)})
+            try:
+                png = sim.to_png(sim.render())
+            except VisionUnavailable as exc:
+                pytest.skip(str(exc))
+            assert abs(find_blobs_with_yaw(png)["red"][2] - deg) < 1.5, deg
+
+
+def test_perceive_uses_reported_yaw(sim, robot):
+    from openrobot_brain.schema import Observation
+    u, v = sim.camera.project(np.array([0.5, 0.0, 0.04]))
+    w, _ = perceive([Observation(id="red_cube", label="red cube", u=u, v=v, yaw_deg=50.0)], sim.camera,
+                    robot.cube_size_m)
+    assert np.isclose(np.degrees(w.objects["red_cube"].yaw), -40.0)   # 50 deg folds to -40 deg

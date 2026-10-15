@@ -34,7 +34,7 @@ The model never supplies:
 | `place_*` while empty-handed | rejected |
 | `place_on` itself, or on an object that already has something on top | rejected |
 | Stack height | at most 3 |
-| `place_at` | inside workspace, at least 6 cm from other objects |
+| `place_at` | inside workspace, at least 6 cm from other objects and 8 cm from fixed obstacles |
 | `move_to` | inside workspace, 1.5 cm ≤ z ≤ 60 cm |
 | `wait` | 0 < duration ≤ 3 s |
 
@@ -53,7 +53,8 @@ Every sample of the expanded trajectory is checked against the world **belief**:
 | TCP workspace | x 0.32–0.70 m, y −0.30–0.30 m, z 0.015–0.60 m |
 | Sideways motion | only at or above 16 cm |
 | Arm vs table | no contact |
-| Arm vs objects | contact only with the object being picked or placed |
+| Arm or held object vs fixed obstacles | at least 1.5 cm clearance (contact margin on a private copy of the model; physics is unaffected) |
+| Arm vs objects | contact only with the object being picked or placed (each object at its believed angle) |
 | Held object vs world | contact only with its place target (or the table for `place_at`) |
 | Round motion time | ≤ 60 s |
 
@@ -64,7 +65,7 @@ All violations are collected and reported together. Any violation rejects the wh
 - Accepts only `ValidatedPlan` (token-guarded constructor).
 - Single use: a plan cannot be replayed after the world has changed.
 - Refuses if the arm's joints or the gripper state differ from what the plan was validated with.
-- Stops if the gripper closes on nothing, the object slips during the lift, or the arm lags its command by more than 0.12 rad.
+- Stops if the gripper closes on nothing (< 1 cm), closes wider than the cube + 6 mm (gripping the corners: "grasp misaligned"), the object slips during the lift, or the arm lags its command by more than 0.12 rad.
 - MuJoCo only. No hardware drivers exist in this codebase.
 
 ## Loop limits (`agent.py`)
