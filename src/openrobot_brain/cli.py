@@ -119,8 +119,8 @@ def _cmd_run(args) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        from dotenv import load_dotenv
-        load_dotenv()  # .env in the current directory; values are never printed
+        from dotenv import find_dotenv, load_dotenv
+        load_dotenv(find_dotenv(usecwd=True))  # .env in the current directory; values are never printed
     except ImportError:  # pragma: no cover
         pass
 
