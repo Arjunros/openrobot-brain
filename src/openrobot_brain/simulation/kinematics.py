@@ -64,6 +64,17 @@ def place_obstacles(m: mujoco.MjModel, d: mujoco.MjData, obstacles) -> dict[int,
     return placed
 
 
+def place_zones(m: mujoco.MjModel, d: mujoco.MjData, zones) -> None:
+    """Put each zone's marker on the mat where the map says; park the rest off the table."""
+    from ..scenes import ZONE_SPECS
+    for i, (zid, spec) in enumerate(ZONE_SPECS.items()):
+        bid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, spec["body"])
+        if bid < 0:
+            raise SceneError(f"scene is missing zone body {spec['body']!r}")
+        z = zones.get(zid)
+        d.mocap_pos[m.body_mocapid[bid]] = (z.x, z.y, 0.0008) if z else (6.0 + i, 12.0, 0.0008)
+
+
 def yaw_quat(yaw: float) -> tuple[float, float, float, float]:
     """MuJoCo quaternion (w, x, y, z) for a turn of `yaw` about the vertical."""
     return (float(np.cos(yaw / 2)), 0.0, 0.0, float(np.sin(yaw / 2)))

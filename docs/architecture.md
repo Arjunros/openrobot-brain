@@ -16,7 +16,7 @@ The language model is a proposal generator. Its output is untrusted text. Everyt
 | Validate | `safety.py` | segments → `ValidatedPlan` | `SafetyError`, fed back, nothing moves |
 | Execute | `simulation/executor.py` | `ValidatedPlan` → `RoundResult` | stops on missed grasp, drop, or blocked arm |
 
-After 3 consecutive invalid or rejected rounds, or the round limit (8), the loop stops.
+After 3 consecutive invalid or rejected rounds, or the round limit (8), the loop stops. Then the **goal check** (`goals.py`) runs on simulator ground truth, whatever the model said.
 
 ## Planner (`planner.py`)
 
@@ -52,7 +52,7 @@ Cartesian segments follow straight lines (turning the gripper gradually when its
 
 ## Obstacles and routing (`scenes.py`, `skills.py`)
 
-Scenes (`default`, `wall`, `posts`) define fixed obstacles and a starting cube layout. Obstacles are mocap bodies in `orb_tabletop.xml`, placed by code and never moved by physics; unused ones are parked off the table. They are part of the robot's belief from the map, not from the camera, and are listed in every prompt.
+Scenes (`default`, `wall`, `posts`, `sorting`) define fixed obstacles and a starting cube layout. Obstacles are mocap bodies in `orb_tabletop.xml`, placed by code and never moved by physics; unused ones are parked off the table. They are part of the robot's belief from the map, not from the camera, and are listed in every prompt.
 
 `travel()` moves at transit height and asks `_route()` for waypoints. Candidates, tried shortest first:
 
@@ -63,6 +63,26 @@ Scenes (`default`, `wall`, `posts`) define fixed obstacles and a starting cube l
 Each candidate is screened by sampling it every 1 cm (IK reachable, no contact within the clearance) and the first that passes is expanded into normal segments, which the validator then checks in full. With no obstacles, the straight line is used without screening.
 
 Cartesian segments are **time-scaled**: if any joint would exceed 90% of the speed limit (it happens near the workspace edge, where a slow hand can still mean fast joints), the segment is stretched.
+
+## Zones and `place_in` (`scenes.py`, `skills.py`)
+
+The `sorting` scene has three 15 cm coloured squares (`red_zone`, `green_zone`, `blue_zone`). They are flat mocap boxes with collisions off, tinted dull enough that the cube colour detector never fires on them. Like obstacles they come from the map and are listed in the prompt; if the model reports one as an object, perception drops it with a warning.
+
+`place_in(zone)` tries the zone's four quadrant spots (3.2 cm from the centre, so cubes in one zone stay 6.4 cm apart) and takes the first that passes the same rules as `place_at` (workspace, 6 cm from other cubes, 8 cm from obstacles). A full zone is refused before any motion is planned. The release angle is chosen with the fingers open, so they don't clip a neighbour.
+
+## Goal checks (`goals.py`)
+
+`check_goal(task, world)` recognises a few task families from the task text and checks them against ground truth:
+
+| Family | Passes when |
+|---|---|
+| sort | every cube rests (by centre) inside its own colour's zone |
+| tower | all cubes in one stack, centres within 1.5 cm, levels within 8 mm; optional bottom-up order ("green at the bottom") |
+| stack X on Y | X rests on Y |
+| row | all on the table, within 2 cm of a best-fit line, neighbours ≥ 5 cm apart, in the named order ("left to right" = robot's left, +y, first) |
+| pick | the cube is in the gripper |
+
+Anything else returns no check. The CLI prints the verdict and warns when the model said `done` but the goal is not met; recordings show a GOAL MET / GOAL NOT MET badge.
 
 ## Safety (`safety.py`)
 

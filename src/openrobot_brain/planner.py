@@ -22,6 +22,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+import numpy as np
+
 from .config import RobotConfig
 from .schema import response_json_schema
 from .world import WorldState
@@ -104,6 +106,9 @@ table surface at z = 0. Reachable area: x {ws.x[0]}..{ws.x[1]}, y {ws.y[0]}..{ws
 
 {perception}
 
+Some scenes have ZONES: coloured squares marked on the mat, listed by name in each round's message. They
+are markings, not objects: never list them in observations. Use place_in to put a cube into one.
+
 Some scenes have FIXED OBSTACLES (walls, posts). Their positions come from the cell map and are listed in
 each round's message. The robot plans routes around or over them by itself; just never pick them, place on
 them, or put a cube within 8 cm of them.
@@ -112,6 +117,7 @@ ACTIONS (the only ones that exist):
   pick {{object}}            grasp an object from above. Gripper must be empty; nothing may be on top of it.
   place_on {{object}}        put the held object on top of another object (stacks up to {lim.max_stack_height} high).
   place_at {{x, y}}          put the held object on the table at (x, y); needs {lim.place_clearance_m} m clear of other objects.
+  place_in {{zone}}          put the held object into a named zone (the robot picks a free spot in it).
   move_to {{x, y, z}}        move the gripper tip to a point (e.g. to point at something). z >= {ws.tcp_z_min}.
   go_home {{}}               return to the parked camera pose.
   wait {{duration_s}}        pause, at most {lim.max_wait_s} s.
@@ -225,10 +231,14 @@ def _resp(status: str, message: str, actions: list[dict] | None = None) -> str:
 
 class OfflinePlanner:
     """Handles a few demo tasks: 'stack red on blue', 'pick up green', 'build a tower',
-    and 'unsafe demo' (deliberately rejected by the safety validator)."""
+    'sort the cubes into their zones', 'arrange the cubes in a row: red, green, blue',
+    and 'unsafe demo' (deliberately rejected by the safety validator). One step per round."""
 
     name = "offline"
     model = "scripted"
+
+    def __init__(self):
+        self._row_x: float | None = None   # where this run's row goes, fixed once chosen
 
     def respond(self, rin: RoundInput) -> str:
         task = rin.task.lower()
@@ -243,8 +253,40 @@ class OfflinePlanner:
             return _resp("act", "Deliberately unsafe demo: carry the red cube off the table.",
                          [{"action": "pick", "object": "red_cube"}, {"action": "place_at", "x": 1.2, "y": 0.0}])
 
+        if "sort" in task and w.zones:
+            for c in ("red", "green", "blue"):
+                cid, zone = _cube(c), f"{c}_zone"
+                if cid in w.objects and zone in w.zones and w.zone_of(cid) != zone:
+                    acts = [] if w.held == cid else [{"action": "pick", "object": cid}]
+                    acts.append({"action": "place_in", "zone": zone})
+                    return _resp("act", f"Putting the {c} cube in the {c} zone.", acts)
+            return _resp("done", "Every cube is in its own colour's zone.")
+
+        if "row" in task or "line" in task:
+            order = list(dict.fromkeys(colors)) if len(set(colors)) == 3 else ["red", "green", "blue"]
+            ys = (0.12, 0.0, -0.12)                       # robot's left to right
+            if self._row_x is None:
+                def clear(x):
+                    cubes_ok = all(np.hypot(o.pos[0] - x, o.pos[1] - y) >= 0.07 or o.id == _cube(c)
+                                   for c, y in zip(order, ys) for o in w.objects.values())
+                    walls_ok = all(ob.footprint_distance(x, y) >= 0.08 for y in ys for ob in w.obstacles.values())
+                    return cubes_ok and walls_ok
+                self._row_x = next((x for x in (0.36, 0.50, 0.64) if clear(x)), None)
+                if self._row_x is None:
+                    return _resp("infeasible", "The scripted planner found no clear straight row on this table "
+                                               "(its rows run across the table, and something is in the way).")
+            for c, y in zip(order, ys):
+                p = w.objects[_cube(c)].pos
+                if w.held == _cube(c) or np.hypot(p[0] - self._row_x, p[1] - y) > 0.01:
+                    acts = [] if w.held == _cube(c) else [{"action": "pick", "object": _cube(c)}]
+                    acts.append({"action": "place_at", "x": self._row_x, "y": y})
+                    return _resp("act", f"Moving the {c} cube into the row.", acts)
+            return _resp("done", f"The cubes are in a row, left to right: {', '.join(order)}.")
+
         if "tower" in task or "all" in task:
-            order = colors if len(colors) == 3 else ["blue", "red", "green"]
+            asked = list(dict.fromkeys(colors))                 # bottom-up, e.g. "green at the bottom"
+            rest = [c for c in ("blue", "red", "green") if c not in asked]
+            order = rest + asked if ("top" in task and "bottom" not in task) else asked + rest
             for below, above in zip(order, order[1:]):
                 if not on(_cube(above), _cube(below)):
                     return self._stack(w, _cube(above), _cube(below))
@@ -263,7 +305,8 @@ class OfflinePlanner:
             return _resp("act", f"Picking up the {colors[0]} cube.", [{"action": "pick", "object": a}])
 
         return _resp("infeasible", "The offline demo planner only knows: 'stack <colour> on <colour>', "
-                                   "'pick up <colour>', 'build a tower', 'unsafe demo'.")
+                                   "'pick up <colour>', 'build a tower', 'sort the cubes into their zones', "
+                                   "'arrange the cubes in a row', 'unsafe demo'.")
 
     @staticmethod
     def _stack(w: WorldState, a: str, b: str) -> str:

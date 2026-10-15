@@ -22,14 +22,18 @@ COLORS = ("red", "green", "blue", "yellow", "orange", "purple", "black", "white"
 
 
 def perceive(observations: list[Observation], cam: CameraModel, cube_size: float,
-             held: WorldObject | None = None, obstacles=None) -> tuple[WorldState, list[str]]:
-    """Belief = cubes the model saw (pixels -> metres) + fixed obstacles from the map."""
+             held: WorldObject | None = None, obstacles=None, zones=None) -> tuple[WorldState, list[str]]:
+    """Belief = cubes the model saw (pixels -> metres) + fixed obstacles and zones from the map."""
     warnings: list[str] = []
     obstacles = dict(obstacles or {})
+    zones = dict(zones or {})
     kept = []
     for o in observations:
-        if o.id in obstacles or any(w in o.label.lower() for w in ("wall", "post", "obstacle")):
+        label = o.label.lower()
+        if o.id in obstacles or any(w in label for w in ("wall", "post", "obstacle")):
             warnings.append(f"{o.id}: '{o.label}' looks like a fixed obstacle; obstacles come from the map, ignored")
+        elif o.id in zones or any(w in label for w in ("zone", "square", "area", "mat")):
+            warnings.append(f"{o.id}: '{o.label}' looks like a zone marking; zones come from the map, ignored")
         else:
             kept.append(o)
     observations = kept
@@ -47,7 +51,7 @@ def perceive(observations: list[Observation], cam: CameraModel, cube_size: float
             return 0
         return 1 + level(base, seen + (o.id,))
 
-    world = WorldState(cube_size=cube_size, obstacles=obstacles)
+    world = WorldState(cube_size=cube_size, obstacles=obstacles, zones=zones)
     for o in observations:
         if held is not None and o.id == held.id:
             continue

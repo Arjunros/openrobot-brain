@@ -23,6 +23,7 @@ from typing import Any, TextIO
 import numpy as np
 
 from .config import RobotConfig
+from .goals import GoalCheck, check_goal
 from .perception import perceive, score_perception
 from .planner import Planner, PlannerError, RoundInput, check_task
 from .safety import SafetyError, ValidatedPlan, validate_round
@@ -37,6 +38,7 @@ class AgentOutcome:
     message: str
     rounds: int
     history: list[dict[str, Any]] = field(default_factory=list)
+    goal: GoalCheck | None = None      # independent check of the result (None = task type not recognised)
 
 
 def _fmt_action(a) -> str:
@@ -47,12 +49,17 @@ def _fmt_action(a) -> str:
 
 
 def build_prompt(task: str, rnd: int, max_rounds: int, vision: bool, belief_text: str | None,
-                 held_note: str, history: list[dict[str, Any]], obstacles_text: str | None = None) -> str:
+                 held_note: str, history: list[dict[str, Any]], obstacles_text: str | None = None,
+                 zones_text: str | None = None) -> str:
     lines = [f"TASK: {task}", f"ROUND {rnd} of at most {max_rounds}.", f"GRIPPER: {held_note}"]
     if obstacles_text:
         lines.append("\nFIXED OBSTACLES (from the cell map, not the camera; the robot routes around or over them "
                      "by itself; do not list them in observations; never pick them, place on them, or place a "
                      "cube within 8 cm of them):\n" + obstacles_text)
+    if zones_text:
+        lines.append("\nZONES (coloured squares marked on the mat, from the cell map; they are not objects, so do "
+                     "not list them in observations; use place_in to put a cube into one; each holds up to 4 cubes):\n"
+                     + zones_text)
     if history:
         lines.append("\nWHAT HAPPENED SO FAR:")
         for h in history[-4:]:
@@ -74,6 +81,30 @@ def build_prompt(task: str, rnd: int, max_rounds: int, vision: bool, belief_text
 
 
 def run_agent(task: str, planner: Planner, sim: PandaSim, robot: RobotConfig, *, execute: bool,
+              vision: bool, max_rounds: int | None = None, out: TextIO | None = None,
+              save_dir: Path | None = None) -> AgentOutcome:
+    """Run the closed loop, then check the result independently of what the model claimed."""
+    out = out or sys.stdout
+    outcome = _run_loop(task, planner, sim, robot, execute=execute, vision=vision, max_rounds=max_rounds,
+                        out=out, save_dir=save_dir)
+    if outcome.status in ("dry_run", "error"):
+        return outcome
+    outcome.goal = check_goal(task, sim.ground_truth())
+    say = lambda *a: print(*a, file=out, flush=True)  # noqa: E731
+    g = outcome.goal
+    if g is None:
+        say("Independent goal check: not available for this kind of task.")
+        return outcome
+    say(f"Independent goal check ({g.goal}): {'✓ MET' if g.passed else '✗ NOT MET'}: {g.detail}")
+    if outcome.status == "done" and not g.passed:
+        say("⚠ The model reported 'done', but the goal is not met.")
+    sim.annotate(subtitle=f"goal check ({g.goal}): {g.detail}",
+                 badge=("GOAL MET" if g.passed else "GOAL NOT MET", (30, 150, 70) if g.passed else (190, 40, 40)))
+    sim.record_still(2.5)
+    return outcome
+
+
+def _run_loop(task: str, planner: Planner, sim: PandaSim, robot: RobotConfig, *, execute: bool,
               vision: bool, max_rounds: int | None = None, out: TextIO | None = None,
               save_dir: Path | None = None) -> AgentOutcome:
     out = out or sys.stdout
@@ -106,8 +137,9 @@ def run_agent(task: str, planner: Planner, sim: PandaSim, robot: RobotConfig, *,
         held_note = (f"holding {held_belief.id} (out of view)" if (vision and held_belief) else
                      f"holding {truth.held}" if (not vision and truth.held) else "empty")
         obstacles_text = truth.describe_obstacles() if truth.obstacles else None   # the map, known in advance
+        zones_text = truth.describe_zones() if truth.zones else None
         prompt = build_prompt(task, rnd, max_rounds, vision, None if vision else truth.describe(), held_note,
-                              history, obstacles_text)
+                              history, obstacles_text, zones_text)
         rin = RoundInput(task, rnd, max_rounds, prompt, img_png, truth, history)
 
         t0 = time.perf_counter()
@@ -139,7 +171,7 @@ def run_agent(task: str, planner: Planner, sim: PandaSim, robot: RobotConfig, *,
         # Belief about the world
         if vision:
             belief, warns = perceive(list(resp.observations), sim.camera, robot.cube_size_m, held_belief,
-                                     obstacles=truth.obstacles)
+                                     obstacles=truth.obstacles, zones=truth.zones)
             for w in warns:
                 say(f"  perception warning: {w}")
             scores = score_perception(belief, truth)

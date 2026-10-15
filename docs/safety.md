@@ -9,7 +9,7 @@ Model output is untrusted. It may be malformed, add fields, invent objects, misr
 The model never supplies:
 
 - code, shell commands, or tool calls (the schema has no such fields; the API request has no tools);
-- joint angles or raw trajectories (only six high-level actions);
+- joint angles or raw trajectories (only seven high-level actions);
 - object coordinates in vision mode (only pixels, converted locally);
 - any flag that skips or relaxes a check (unknown fields are rejected).
 
@@ -35,6 +35,7 @@ The model never supplies:
 | `place_on` itself, or on an object that already has something on top | rejected |
 | Stack height | at most 3 |
 | `place_at` | inside workspace, at least 6 cm from other objects and 8 cm from fixed obstacles |
+| `place_in` | known zone; first of its 4 spots that passes the `place_at` rules; a full zone is rejected |
 | `move_to` | inside workspace, 1.5 cm ≤ z ≤ 60 cm |
 | `wait` | 0 < duration ≤ 3 s |
 
@@ -73,7 +74,7 @@ All violations are collected and reported together. Any violation rejects the wh
 - At most 8 rounds.
 - Stops after 3 consecutive invalid or rejected rounds.
 - Dry run (no `--execute`) plans and validates round 1 only.
-- "Done" is the model's claim. The CLI prints simulator ground truth next to it, so you can see whether it is true.
+- "Done" is the model's claim. An independent goal check (`goals.py`) reads simulator ground truth and prints GOAL MET / NOT MET, with a warning when the model said "done" but the goal is not met. It reports; it never moves the robot.
 
 ## Known limitations
 

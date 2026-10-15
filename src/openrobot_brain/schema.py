@@ -6,7 +6,7 @@ Each round the model returns:
       "status": "act" | "done" | "infeasible",
       "message": "...",
       "observations": [{"id", "label", "u", "v", "yaw_deg", "on_top_of"}],   # vision mode
-      "actions": [ pick | place_on | place_at | move_to | go_home | wait ]
+      "actions": [ pick | place_on | place_at | place_in | move_to | go_home | wait ]
     }
 
 This module checks *shape* only. Whether an action is possible and safe for
@@ -49,6 +49,11 @@ class PlaceAt(_Strict):
     y: FiniteFloat
 
 
+class PlaceIn(_Strict):
+    action: Literal["place_in"]
+    zone: ObjectId
+
+
 class MoveTo(_Strict):
     action: Literal["move_to"]
     x: FiniteFloat
@@ -65,7 +70,7 @@ class Wait(_Strict):
     duration_s: FiniteFloat
 
 
-Action = Annotated[Union[Pick, PlaceOn, PlaceAt, MoveTo, GoHome, Wait], Field(discriminator="action")]
+Action = Annotated[Union[Pick, PlaceOn, PlaceAt, PlaceIn, MoveTo, GoHome, Wait], Field(discriminator="action")]
 
 
 class Observation(_Strict):
@@ -148,6 +153,7 @@ def response_json_schema() -> dict[str, Any]:
             act("pick", object=s),
             act("place_on", object=s),
             act("place_at", x=n, y=n),
+            act("place_in", zone=s),
             act("move_to", x=n, y=n, z=n),
             act("go_home"),
             act("wait", duration_s=n),

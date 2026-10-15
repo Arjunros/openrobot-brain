@@ -66,16 +66,46 @@ class Obstacle:
                 f"y={self.y:+.3f}, turned {np.degrees(self.yaw):+.0f} deg")
 
 
+@dataclass(frozen=True)
+class Zone:
+    """A marked area of the table from the cell's map (a square, flat; nothing collides with it)."""
+    id: str
+    label: str
+    x: float
+    y: float
+    half: float                       # half the side length, metres
+    slot_offset: float = 0.032        # place_in puts cubes at the centres of 4 quadrants
+
+    def contains(self, px: float, py: float) -> bool:
+        return abs(px - self.x) <= self.half and abs(py - self.y) <= self.half
+
+    def slots(self) -> list[tuple[float, float]]:
+        d = self.slot_offset
+        return [(self.x + a, self.y + b) for a, b in ((-d, d), (-d, -d), (d, d), (d, -d))]
+
+    def describe(self) -> str:
+        return (f"  - {self.id} ({self.label}, {2 * self.half * 100:.0f} cm square): centre x={self.x:.3f} "
+                f"y={self.y:+.3f}")
+
+
 @dataclass
 class WorldState:
     objects: dict[str, WorldObject] = field(default_factory=dict)
     held: str | None = None
     cube_size: float = 0.04
     obstacles: dict[str, Obstacle] = field(default_factory=dict)   # from the map; frozen, safe to share
+    zones: dict[str, Zone] = field(default_factory=dict)           # from the map; frozen, safe to share
 
     def copy(self) -> "WorldState":
         return WorldState({k: o.copy() for k, o in self.objects.items()}, self.held, self.cube_size,
-                          dict(self.obstacles))
+                          dict(self.obstacles), dict(self.zones))
+
+    def zone_of(self, oid: str) -> str | None:
+        """The zone an object rests in (by its centre), if any."""
+        o = self.objects[oid]
+        if oid == self.held:
+            return None
+        return next((z.id for z in self.zones.values() if z.contains(o.pos[0], o.pos[1])), None)
 
     def resting(self) -> list[WorldObject]:
         return [o for o in self.objects.values() if o.id != self.held]
@@ -98,6 +128,9 @@ class WorldState:
     def describe_obstacles(self) -> str:
         return "\n".join(o.describe() for o in self.obstacles.values()) or "  (none)"
 
+    def describe_zones(self) -> str:
+        return "\n".join(z.describe() for z in self.zones.values()) or "  (none)"
+
     def describe(self) -> str:
         if not self.objects:
             return "  (no objects)"
@@ -105,5 +138,6 @@ class WorldState:
         for o in self.objects.values():
             where = ("held in gripper" if o.id == self.held else
                      f"x={o.pos[0]:.3f} y={o.pos[1]:+.3f} z={o.pos[2]:.3f} turned {np.degrees(o.yaw):+.0f} deg")
-            lines.append(f"  - {o.id} ({o.label}): {where}")
+            zone = self.zone_of(o.id) if o.id != self.held else None
+            lines.append(f"  - {o.id} ({o.label}): {where}" + (f", in {zone}" if zone else ""))
         return "\n".join(lines)

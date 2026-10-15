@@ -11,11 +11,12 @@
 You type a task like *"stack the red cube on the blue cube"*. Each round:
 
 1. **See.** The arm parks out of view and an overhead camera takes a picture.
-2. **Think.** GPT-6 Astra gets the image and returns where each object is (pixel coordinates), what it decides, and up to 6 high-level actions (`pick`, `place_on`, `place_at`, `move_to`, `go_home`, `wait`). It can also answer `done` or `infeasible`.
+2. **Think.** GPT-6 Astra gets the image and returns where each object is (pixel coordinates), what it decides, and up to 6 high-level actions (`pick`, `place_on`, `place_at`, `place_in`, `move_to`, `go_home`, `wait`). It can also answer `done` or `infeasible`.
 3. **Ground.** The robot converts those pixels into metres with a calibrated camera model. The model never invents raw coordinates.
 4. **Check.** Actions are expanded into the exact joint trajectory the arm would follow, and every sample is checked: inverse kinematics, joint limits and speeds, workspace, transit height, and collisions with the table and other objects. One violation rejects the whole round and nothing moves.
 5. **Act.** MuJoCo plays the validated trajectory on a physically simulated Panda.
 6. **Learn.** What happened (grasp succeeded, gripper closed on nothing, plan rejected and why) goes back to the model with a fresh image, and it tries again, up to a capped number of rounds.
+7. **Verify.** When the model says `done`, an independent goal check reads the simulator's ground truth and prints **GOAL MET** or **GOAL NOT MET**, so a confident but wrong "done" is visible.
 
 ```
 camera ─▶ GPT-6 Astra ─▶ pixels → metres ─▶ skills → joint trajectory ─▶ safety checks ─▶ MuJoCo
@@ -29,6 +30,8 @@ camera ─▶ GPT-6 Astra ─▶ pixels → metres ─▶ skills → joint traje
 
 - Simulation only (MuJoCo). There is no code path to real hardware.
 - Optional fixed obstacles (`--scene wall` or `--scene posts`, 16 cm tall) come from a known map, like a robot cell's fixtures. The robot routes around or over them on its own and keeps 1.5 cm of clearance; only the cubes are perceived.
+- Tasks beyond stacking: sorting cubes into coloured zones (`--scene sorting`), arranging them in a straight row in a given order, and towers in a requested order. Zones are flat painted squares from the map; `place_in` picks a free spot inside one.
+- Goal checks recognise sort, tower (with order), stack, row and pick tasks from the task text. Other tasks get no check rather than a guess.
 - Objects are 4 cm cubes. They can sit at any angle (`--seed N` gives random positions and angles): the model reads each cube's angle from the image, and the gripper turns to grip it square-on. The gripper always points straight down.
 - GPT-6 Astra is the only AI planner. The `--offline` planner is a short script for demos and tests, and it is labelled as such everywhere.
 - **First live result (one run, not a benchmark):** GPT-6 Astra (`effort=low`) located all three visible cubes from the overhead image to within **0.0–0.2 cm** of ground truth and completed "stack the red cube on the blue cube" in 3 rounds (one round was an invalid response, rejected and fed back). The partly hidden base cube was estimated within 1.9 cm. Every run prints these errors, so you can check them yourself.
@@ -65,6 +68,7 @@ orb demos                                                         # list offline
 # No API key needed (scripted, not AI)
 orb run "build a tower" --offline --execute
 orb run "unsafe demo" --offline --execute                         # rejected every round, nothing moves
+orb run "sort the cubes into their zones" --scene sorting --offline --execute
 
 # GPT-6 Astra with vision
 orb run "stack the red cube on the blue cube"                     # plan + validate round 1 only (dry run)
@@ -74,6 +78,9 @@ orb run "pick up the purple cube" --execute                       # expect: NOT 
 orb run "stack red on blue" --no-vision --execute                 # model gets positions instead of an image
 orb run "build a tower" --scene wall --execute                     # a wall in the way: around or over it
 orb run "build a tower" --scene posts --seed 4 --execute           # posts + random cube layout
+orb run "sort the cubes into their zones" --scene sorting --execute # each cube into its colour's zone
+orb run "arrange the cubes in a row: blue, red, green, left to right" --execute
+orb run "build a tower with green at the bottom" --execute
 
 # Recording and presentation
 orb run "build a tower" --execute --hold --speed 0.5              # keep the window open, slow motion
@@ -93,7 +100,7 @@ orb snapshot --seed 7                                             # save overhea
 | `--effort low…max` | Astra reasoning effort (default `low`) |
 | `--rounds N` | round limit (cap 8) |
 | `--seed N` | random cube positions and angles |
-| `--scene wall\|posts` | fixed obstacles on the table (default: none) |
+| `--scene wall\|posts\|sorting` | fixed obstacles, or coloured zones (default: none) |
 | `--offline` | scripted demo planner, no API |
 
 Exit codes: `0` done or dry run, `2` rejected by safety, `3` planner/API error, `4` simulation error, `5` not completed (infeasible or round limit).
@@ -101,7 +108,7 @@ Exit codes: `0` done or dry run, `2` rejected by safety, `3` planner/API error, 
 ## Test
 
 ```powershell
-pytest                                                             # ~120 tests, no API key, ~1 min
+pytest                                                             # ~180 tests, no API key, ~2 min
 $env:ORB_LIVE_OPENAI_KEY = "sk-..."; pytest -m live -s             # optional: one live Astra vision run
 ```
 
@@ -112,12 +119,14 @@ The suite runs real physics (grasps, stacking, missed grasps), real rendering, a
 ```
 src/openrobot_brain/
   agent.py        closed loop: observe → plan → ground → validate → execute → feed back
+  goals.py        independent goal checks against simulator ground truth
+  scenes.py       scenes: obstacles, zones, starting layouts
   planner.py      GPT-6 Astra (Responses API, image input, strict JSON) + offline script
   schema.py       strict round schema: status, message, observations, actions
   perception.py   model pixels → metres; perception error vs ground truth
-  skills.py       pick / place_on / place_at / move_to / go_home / wait → joint trajectories
+  skills.py       pick / place_on / place_at / place_in / move_to / go_home / wait → joint trajectories
   safety.py       independent trajectory validator → ValidatedPlan
-  world.py        world belief (objects, stacks, held object)
+  world.py        world belief (objects, stacks, held object, obstacles, zones)
   config.py       joint limits, workspace, speeds, safety limits
   simulation/
     executor.py   PandaSim: reset, camera, execute, grasp detection, viewer

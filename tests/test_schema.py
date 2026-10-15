@@ -90,7 +90,7 @@ def test_strict_schema_is_closed_and_fully_required():
     schema = response_json_schema()
     walk(schema)
     names = {a["properties"]["action"]["enum"][0] for a in schema["properties"]["actions"]["items"]["anyOf"]}
-    assert names == {"pick", "place_on", "place_at", "move_to", "go_home", "wait"}
+    assert names == {"pick", "place_on", "place_at", "place_in", "move_to", "go_home", "wait"}
 
 
 def test_schema_has_no_code_or_safety_override_fields():

@@ -30,6 +30,9 @@ DEMOS = {
     "unsafe demo": "carries a cube off the table; the validator rejects it every round",
     "stack the red cube on the blue cube --scene wall": "a 16 cm wall in the way: the arm routes around or over it",
     "build a tower --scene posts": "two posts between the cubes",
+    "sort the cubes into their zones --scene sorting": "each cube into its own colour's zone (place_in)",
+    "arrange the cubes in a row: blue, red, green, left to right": "a straight row in a given order",
+    "build a tower with green at the bottom": "tower in a requested order",
 }
 
 

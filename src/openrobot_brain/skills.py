@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .config import RobotConfig
-from .schema import Action, GoHome, MoveTo, Pick, PlaceAt, PlaceOn, Wait
+from .schema import Action, GoHome, MoveTo, Pick, PlaceAt, PlaceIn, PlaceOn, Wait
 from .simulation.kinematics import Kinematics, grasp_rotation, tcp_yaw
 from .world import WorldState, wrap_square
 
@@ -99,6 +99,20 @@ class SkillExpander:
             t = t * (peak / cap)
         return Segment(idx, label, "cartesian", t, qs, gripper, finger_open, world.copy(),
                        tcp_targets=targets, ik_errors=errs, **kw)
+
+    def _place_problem(self, world: WorldState, x: float, y: float) -> str | None:
+        """Why a cube cannot be set down on the table at (x, y), or None if it can."""
+        r, ws = self.robot, self.ws
+        if not ws.contains_xy(x, y):
+            return f"({x:.3f}, {y:.3f}) is outside the workspace x{ws.x} y{ws.y}"
+        for o in world.resting():
+            if np.linalg.norm(o.pos[:2] - np.array([x, y])) < r.safety.place_clearance_m:
+                return f"({x:.3f}, {y:.3f}) is too close to {o.id!r}; need {r.safety.place_clearance_m} m clearance"
+        for ob in world.obstacles.values():
+            if ob.footprint_distance(x, y) < r.safety.obstacle_place_clearance_m:
+                return (f"({x:.3f}, {y:.3f}) is too close to obstacle {ob.id!r}; need "
+                        f"{r.safety.obstacle_place_clearance_m} m from it")
+        return None
 
     def _yaw(self, q) -> float:
         return tcp_yaw(self.kin.fk(q)[1])
@@ -300,7 +314,7 @@ class SkillExpander:
                                                 may_touch=frozenset({a.object}), held_may_touch_floor=True))
                     q = segs[-1].q[-1]
 
-                elif isinstance(a, (PlaceOn, PlaceAt)):
+                elif isinstance(a, (PlaceOn, PlaceAt, PlaceIn)):
                     if world.held is None:
                         raise SkillError("not holding anything")
                     c = world.cube_size
@@ -317,36 +331,42 @@ class SkillExpander:
                         touch = frozenset({world.held, a.object})
                         label = f"lower onto {a.object}"
                         want_yaw = world.objects[a.object].yaw - held_offset   # line the cube up with the base
+                    elif isinstance(a, PlaceIn):
+                        if a.zone not in world.zones:
+                            known = ", ".join(world.zones) or "none in this scene"
+                            raise SkillError(f"unknown zone {a.zone!r} (zones: {known})")
+                        zone = world.zones[a.zone]
+                        free = [s for s in zone.slots() if self._place_problem(world, *s) is None]
+                        if not free:
+                            raise SkillError(f"{a.zone!r} has no free spot left")
+                        dest = np.array([free[0][0], free[0][1], c / 2])
+                        touch = frozenset({world.held})
+                        label = f"lower into {a.zone}"
+                        want_yaw = self._yaw(q)                                # any of the 4 grips that fits
                     else:
-                        if not ws.contains_xy(a.x, a.y):
-                            raise SkillError(f"({a.x:.3f}, {a.y:.3f}) is outside the workspace "
-                                             f"x{ws.x} y{ws.y}")
-                        for o in world.resting():
-                            if np.linalg.norm(o.pos[:2] - np.array([a.x, a.y])) < r.safety.place_clearance_m:
-                                raise SkillError(f"({a.x:.3f}, {a.y:.3f}) is too close to {o.id!r}; need "
-                                                 f"{r.safety.place_clearance_m} m clearance")
-                        for ob in world.obstacles.values():
-                            if ob.footprint_distance(a.x, a.y) < r.safety.obstacle_place_clearance_m:
-                                raise SkillError(f"({a.x:.3f}, {a.y:.3f}) is too close to obstacle {ob.id!r}; need "
-                                                 f"{r.safety.obstacle_place_clearance_m} m from it")
+                        problem = self._place_problem(world, a.x, a.y)
+                        if problem:
+                            raise SkillError(problem)
                         dest = np.array([a.x, a.y, c / 2])
                         touch = frozenset({world.held})
                         label = f"lower to ({a.x:.2f}, {a.y:.2f})"
-                        want_yaw = None                                        # keep the current turn
+                        want_yaw = self._yaw(q)                                # any of the 4 grips that fits
                     leave_rest(i)
                     rise(i, "rise")
                     release = dest + np.array([0, 0, 0.003])
-                    g = self._yaw(q) if want_yaw is None else self._choose_yaw(
-                        want_yaw, [np.array([dest[0], dest[1], ws.transit_z]), release], q,
-                        world, open_, touch)
+                    # Choose the release turn with the fingers OPEN (as they will be when letting go), so an
+                    # opening finger never lands on a neighbouring cube.
+                    g = self._choose_yaw(want_yaw, [np.array([dest[0], dest[1], ws.transit_z]), release], q,
+                                         world, True, touch)
                     travel(i, "carry", dest[0], dest[1], yaw=g)
+                    on_table = isinstance(a, (PlaceAt, PlaceIn))
                     segs.append(self._cartesian(i, label, q, release, world, grip(), open_, r.approach_speed_m_s,
-                                                may_touch=touch, held_may_touch_floor=isinstance(a, PlaceAt)))
+                                                may_touch=touch, held_may_touch_floor=on_table))
                     q = segs[-1].q[-1]
                     held = world.held
                     segs.append(self._hold(i, "open gripper", "gripper", q, r.gripper_time_s, world,
                                            r.gripper_open_ctrl, True, may_touch=touch,
-                                           held_may_touch_floor=isinstance(a, PlaceAt)))
+                                           held_may_touch_floor=on_table))
                     open_ = True
                     world.objects[held].pos = dest.copy()
                     world.objects[held].yaw = wrap_square(g + held_offset)

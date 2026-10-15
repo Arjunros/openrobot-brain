@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .world import Obstacle
+from .world import Obstacle, Zone
 
 # Geometry of each obstacle body in orb_tabletop.xml (half-sizes in metres; a test checks they match).
 OBSTACLE_SPECS = {
@@ -17,7 +17,19 @@ OBSTACLE_SPECS = {
     "post_b": {"body": "obstacle_post_b", "kind": "post", "half": (0.025, 0.025, 0.08)},
 }
 
+# Marked areas on the mat (visual only). Body names in orb_tabletop.xml; half side 7.5 cm.
+ZONE_SPECS = {
+    "red_zone": {"body": "zone_red", "label": "red zone"},
+    "green_zone": {"body": "zone_green", "label": "green zone"},
+    "blue_zone": {"body": "zone_blue", "label": "blue zone"},
+}
+ZONE_HALF_M = 0.075
+
 Layout = dict[str, tuple[float, float, float]]  # cube -> (x, y, yaw)
+
+
+def make_zone(zid: str, x: float, y: float) -> Zone:
+    return Zone(zid, ZONE_SPECS[zid]["label"], x, y, ZONE_HALF_M)
 
 
 def make_obstacle(oid: str, x: float, y: float, yaw: float = 0.0) -> Obstacle:
@@ -31,6 +43,7 @@ class Scene:
     description: str
     layout: Layout
     obstacles: dict[str, Obstacle] = field(default_factory=dict)
+    zones: dict[str, Zone] = field(default_factory=dict)
 
 
 SCENES: dict[str, Scene] = {
@@ -47,6 +60,12 @@ SCENES: dict[str, Scene] = {
         "posts", "two 16 cm posts stand between the cubes",
         {"red_cube": (0.45, 0.15, 0.0), "green_cube": (0.63, 0.15, 0.0), "blue_cube": (0.45, -0.15, 0.0)},
         {"post_a": make_obstacle("post_a", 0.45, 0.0), "post_b": make_obstacle("post_b", 0.58, -0.04)},
+    ),
+    "sorting": Scene(
+        "sorting", "three coloured zones; the cubes start outside them, each away from its own colour",
+        {"red_cube": (0.60, -0.18, 0.3), "green_cube": (0.47, 0.0, -0.2), "blue_cube": (0.60, 0.12, 0.1)},
+        zones={"red_zone": make_zone("red_zone", 0.40, 0.21), "green_zone": make_zone("green_zone", 0.63, 0.23),
+               "blue_zone": make_zone("blue_zone", 0.40, -0.21)},
     ),
 }
 

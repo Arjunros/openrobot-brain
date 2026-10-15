@@ -26,6 +26,10 @@
     <material name="cube_green" rgba="0.16 0.66 0.25 1"/>
     <material name="cube_blue" rgba="0.15 0.35 0.85 1"/>
     <material name="obstacle" rgba="0.36 0.38 0.42 1" specular="0.1"/>
+    <!-- zone tints are muted on purpose: clearly coloured, but never as saturated as a cube -->
+    <material name="zone_red" rgba="0.78 0.42 0.42 1" specular="0"/>
+    <material name="zone_green" rgba="0.42 0.66 0.42 1" specular="0"/>
+    <material name="zone_blue" rgba="0.42 0.52 0.80 1" specular="0"/>
   </asset>
 
   <default>
@@ -69,6 +73,16 @@
     </body>
     <body name="obstacle_post_a" mocap="true" pos="5 6 0.08">
       <geom name="post_a" type="cylinder" size="0.025 0.08" material="obstacle"/>
+    </body>
+    <!-- Zones: flat marked squares on the mat (15 cm). Visual only: nothing collides with them. -->
+    <body name="zone_red" mocap="true" pos="6 5 0.0008">
+      <geom type="box" size="0.075 0.075 0.0002" material="zone_red" contype="0" conaffinity="0"/>
+    </body>
+    <body name="zone_green" mocap="true" pos="6 6 0.0008">
+      <geom type="box" size="0.075 0.075 0.0002" material="zone_green" contype="0" conaffinity="0"/>
+    </body>
+    <body name="zone_blue" mocap="true" pos="6 7 0.0008">
+      <geom type="box" size="0.075 0.075 0.0002" material="zone_blue" contype="0" conaffinity="0"/>
     </body>
     <body name="obstacle_post_b" mocap="true" pos="5 7 0.08">
       <geom name="post_b" type="cylinder" size="0.025 0.08" material="obstacle"/>

@@ -21,7 +21,7 @@ from ..world import WorldObject, WorldState, wrap_square
 from . import CUBE_BODIES, DEFAULT_SCENE
 from .camera import CameraModel
 from ..scenes import SCENES, Scene, get_scene
-from .kinematics import Kinematics, SceneError, load_model, place_obstacles
+from .kinematics import Kinematics, SceneError, load_model, place_obstacles, place_zones
 
 # (x, y, yaw): metres, metres, radians
 DEFAULT_LAYOUT = SCENES["default"].layout
@@ -59,6 +59,7 @@ def random_layout(seed: int, robot: RobotConfig, min_gap: float = 0.09,
     Without obstacles the draws are exactly as before, so a seed keeps its layout; the yaw is
     drawn afterwards from the same generator."""
     obstacles = list(scene.obstacles.values()) if scene else []
+    zones = list(scene.zones.values()) if scene else []      # cubes start outside every zone
     rng = np.random.default_rng(seed)
     ws = robot.workspace
     placed: dict[str, tuple[float, float]] = {}
@@ -66,7 +67,8 @@ def random_layout(seed: int, robot: RobotConfig, min_gap: float = 0.09,
         for _ in range(500):
             p = (float(rng.uniform(ws.x[0] + 0.04, ws.x[1] - 0.04)), float(rng.uniform(ws.y[0] + 0.04, ws.y[1] - 0.04)))
             if all(math.dist(p, q) >= min_gap for q in placed.values()) and all(
-                    o.footprint_distance(*p) >= OBSTACLE_MARGIN_M for o in obstacles):
+                    o.footprint_distance(*p) >= OBSTACLE_MARGIN_M for o in obstacles) and not any(
+                    z.contains(*p) for z in zones):
                 placed[name] = (round(p[0], 3), round(p[1], 3))
                 break
         else:  # pragma: no cover
@@ -181,6 +183,7 @@ class PandaSim:
         d.ctrl[:7] = self.robot.rest_pose
         d.ctrl[7] = self.robot.gripper_open_ctrl
         place_obstacles(m, d, self.scene.obstacles)
+        place_zones(m, d, self.scene.zones)
         for name in CUBE_BODIES:
             x, y, yaw = layout[name]
             a = k.cube_adr[name]
@@ -206,7 +209,8 @@ class PandaSim:
         return self.data.site_xpos[self.kin.tcp].copy()
 
     def ground_truth(self) -> WorldState:
-        w = WorldState(cube_size=self.robot.cube_size_m, obstacles=dict(self.scene.obstacles))
+        w = WorldState(cube_size=self.robot.cube_size_m, obstacles=dict(self.scene.obstacles),
+                       zones=dict(self.scene.zones))
         tcp = self.tcp()
         for name in CUBE_BODIES:
             a = self.kin.cube_adr[name]
