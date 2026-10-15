@@ -17,12 +17,13 @@ import numpy as np
 
 from ..config import RobotConfig
 from ..safety import ValidatedPlan
-from ..world import WorldObject, WorldState
+from ..world import WorldObject, WorldState, wrap_square
 from . import CUBE_BODIES, DEFAULT_SCENE
 from .camera import CameraModel
 from .kinematics import Kinematics, SceneError, load_model
 
-DEFAULT_LAYOUT = {"red_cube": (0.45, 0.15), "green_cube": (0.60, 0.0), "blue_cube": (0.45, -0.15)}
+# (x, y, yaw): metres, metres, radians
+DEFAULT_LAYOUT = {"red_cube": (0.45, 0.15, 0.0), "green_cube": (0.60, 0.0, 0.0), "blue_cube": (0.45, -0.15, 0.0)}
 IMAGE_W, IMAGE_H = 640, 480
 
 
@@ -50,7 +51,9 @@ class RoundResult:
     sim_time_s: float = 0.0
 
 
-def random_layout(seed: int, robot: RobotConfig, min_gap: float = 0.09) -> dict[str, tuple[float, float]]:
+def random_layout(seed: int, robot: RobotConfig, min_gap: float = 0.09) -> dict[str, tuple[float, float, float]]:
+    """Random (x, y, yaw) per cube. Positions are drawn exactly as before, so a seed keeps its layout;
+    the yaw is drawn afterwards from the same generator."""
     rng = np.random.default_rng(seed)
     ws = robot.workspace
     placed: dict[str, tuple[float, float]] = {}
@@ -62,7 +65,7 @@ def random_layout(seed: int, robot: RobotConfig, min_gap: float = 0.09) -> dict[
                 break
         else:  # pragma: no cover
             raise SimulationError("could not place cubes")
-    return placed
+    return {name: (x, y, round(float(rng.uniform(-np.pi / 4, np.pi / 4)), 3)) for name, (x, y) in placed.items()}
 
 
 class PandaSim:
@@ -158,7 +161,7 @@ class PandaSim:
                 self._renderer = None
 
     # -- state ------------------------------------------------------------------
-    def reset(self, layout: dict[str, tuple[float, float]] | None = None) -> None:
+    def reset(self, layout: dict[str, tuple[float, float, float]] | None = None) -> None:
         layout = layout or DEFAULT_LAYOUT
         m, d, k = self.model, self.data, self.kin
         mujoco.mj_resetData(m, d)
@@ -167,10 +170,10 @@ class PandaSim:
         d.ctrl[:7] = self.robot.rest_pose
         d.ctrl[7] = self.robot.gripper_open_ctrl
         for name in CUBE_BODIES:
-            x, y = layout[name]
+            x, y, yaw = layout[name]
             a = k.cube_adr[name]
             d.qpos[a:a + 3] = (x, y, self.robot.cube_size_m / 2)
-            d.qpos[a + 3:a + 7] = (1, 0, 0, 0)
+            d.qpos[a + 3:a + 7] = (np.cos(yaw / 2), 0, 0, np.sin(yaw / 2))  # turn of `yaw` about vertical (w, x, y, z)
         mujoco.mj_forward(m, d)
         self._settle(0.3)
         self.camera = CameraModel.from_sim(m, d, "overhead", IMAGE_W, IMAGE_H)
@@ -196,7 +199,9 @@ class PandaSim:
         for name in CUBE_BODIES:
             a = self.kin.cube_adr[name]
             pos = self.data.qpos[a:a + 3].copy()
-            w.objects[name] = WorldObject(name, name.replace("_", " "), pos)
+            qw, qz = self.data.qpos[a + 3], self.data.qpos[a + 6]
+            yaw = wrap_square(2 * np.arctan2(qz, qw))
+            w.objects[name] = WorldObject(name, name.replace("_", " "), pos, yaw)
             if self.holding_something() and np.linalg.norm(pos - tcp) < 0.03:
                 w.held = name
         return w

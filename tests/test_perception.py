@@ -97,4 +97,23 @@ def test_random_layout_is_deterministic_and_spaced(robot):
     assert a == b and a != random_layout(8, robot)
     pts = list(a.values())
     assert min(np.hypot(p[0] - q[0], p[1] - q[1]) for i, p in enumerate(pts) for q in pts[i + 1:]) >= 0.09
-    assert all(robot.workspace.contains_xy(*p) for p in pts)
+    assert all(robot.workspace.contains_xy(p[0], p[1]) for p in pts)
+    assert all(-np.pi / 4 <= p[2] <= np.pi / 4 for p in pts)
+    assert any(abs(p[2]) > 0.05 for p in pts)          # actually rotated
+
+
+def test_rotated_cubes_round_trip_through_the_simulator(robot):
+    layout = random_layout(3, robot)
+    with PandaSim(robot) as sim:
+        sim.reset(layout)
+        truth = sim.ground_truth()
+    for name, (x, y, yaw) in layout.items():
+        o = truth.objects[name]
+        assert np.allclose(o.pos[:2], [x, y], atol=0.003)
+        assert abs(o.yaw - yaw) < np.radians(1.0), name
+
+
+def test_wrap_square():
+    from openrobot_brain.world import wrap_square
+    for given, expected in ((0, 0), (30, 30), (50, -40), (-46, 44), (90, 0), (135, -45)):
+        assert np.isclose(np.degrees(wrap_square(np.radians(given))), expected)

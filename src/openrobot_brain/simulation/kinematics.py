@@ -21,6 +21,24 @@ R_DOWN = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]])
 _PARK = np.array([5.0, 5.0, 0.02])  # where unused cube bodies go in collision checks
 
 
+def rot_z(a: float) -> np.ndarray:
+    """Rotation by angle a (radians) about the world's vertical axis."""
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def grasp_rotation(yaw: float) -> np.ndarray:
+    """Gripper pointing straight down, turned by `yaw` about the vertical.
+    At yaw = 0 the fingers close along world x; at yaw = a they close along the
+    x-axis turned by a, i.e. square onto a cube that is itself turned by a."""
+    return rot_z(yaw) @ R_DOWN
+
+
+def yaw_quat(yaw: float) -> tuple[float, float, float, float]:
+    """MuJoCo quaternion (w, x, y, z) for a turn of `yaw` about the vertical."""
+    return (float(np.cos(yaw / 2)), 0.0, 0.0, float(np.sin(yaw / 2)))
+
+
 class SceneError(RuntimeError):
     pass
 
@@ -132,7 +150,8 @@ class Kinematics:
             else:
                 pos = _PARK
             self.d.qpos[adr:adr + 3] = pos
-            self.d.qpos[adr + 3:adr + 7] = (1, 0, 0, 0)
+            # each object at its believed rotation: a turned cube reaches further toward its neighbours
+            self.d.qpos[adr + 3:adr + 7] = yaw_quat(objs[i].yaw) if i < len(objs) else (1, 0, 0, 0)
         mujoco.mj_fwdPosition(self.m, self.d)
 
         out: list[tuple[str, str]] = []

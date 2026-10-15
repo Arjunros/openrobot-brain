@@ -25,7 +25,7 @@ class WorldObject:
     yaw: float = 0.0  # rotation about the vertical axis, radians
 
     def copy(self) -> "WorldObject":
-        return WorldObject(self.id, self.label, self.pos.copy())
+                return WorldObject(self.id, self.label, self.pos.copy(), self.yaw)
 
 
 @dataclass

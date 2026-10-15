@@ -29,3 +29,4 @@ MUJOCO_LOG.TXT
 *.mp4
 snapshots/
 rounds/
+snaps/

@@ -72,6 +72,25 @@ def test_arm_collision_with_object_is_caught(robot, kin):
         check(robot, kin, [pick("red_cube")], w)
 
 
+def test_collision_check_uses_object_rotation(robot, kin):
+    """8.6 cm away, a straight neighbour clears the open fingers, but the same cube
+    turned 45 degrees pokes a corner into their path. The validator must see the turn."""
+    straight = make_world(red_cube=(0.45, 0.15, 0.02), blue_cube=(0.364, 0.15, 0.02))
+    check(robot, kin, [pick("red_cube")], straight)
+    turned = straight.copy()
+    turned.objects["blue_cube"].yaw = np.pi / 4
+    with pytest.raises(SafetyError, match="arm would hit 'blue_cube'"):
+        check(robot, kin, [pick("red_cube")], turned)
+
+
+def test_grasp_rotation():
+    from openrobot_brain.simulation.kinematics import R_DOWN, grasp_rotation
+    assert np.allclose(grasp_rotation(0.0), R_DOWN)
+    R = grasp_rotation(np.pi / 6)
+    assert np.allclose(R[:, 2], [0, 0, -1])                         # still pointing straight down
+    assert np.isclose(np.degrees(np.arctan2(R[1, 1], R[0, 1])), 30)  # finger axis turned 30 degrees
+
+
 def test_neighbour_along_y_is_fine(robot, kin):
     # the same gap along y does not obstruct the fingers
     check(robot, kin, [pick("red_cube")], make_world(red_cube=(0.45, 0.15, 0.02), blue_cube=(0.45, 0.095, 0.02)))
