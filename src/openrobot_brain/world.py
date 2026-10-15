@@ -13,12 +13,16 @@ import numpy as np
 
 STACK_XY_TOL = 0.025  # objects closer than this in xy are treated as one stack
 
+def wrap_square(a: float) -> float:
+    """A square looks identical every 90°, so fold any angle into [-45°, +45°)."""
+    return (a + np.pi / 4) % (np.pi / 2) - np.pi / 4
 
 @dataclass
 class WorldObject:
     id: str
     label: str
     pos: np.ndarray  # centre, metres
+    yaw: float = 0.0  # rotation about the vertical axis, radians
 
     def copy(self) -> "WorldObject":
         return WorldObject(self.id, self.label, self.pos.copy())
