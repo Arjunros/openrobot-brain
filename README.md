@@ -1,5 +1,10 @@
 # OpenRobot-Brain
 
+[![tests](https://github.com/Arjunros/openrobot-brain/actions/workflows/tests.yml/badge.svg)](https://github.com/Arjunros/openrobot-brain/actions/workflows/tests.yml)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+![MuJoCo](https://img.shields.io/badge/sim-MuJoCo-orange)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
+
 **GPT-6 Astra looks at a table through a camera, plans pick-and-place for a Franka Panda, and local code checks every motion before the robot moves.**
 
 ![Three-cube tower built in a closed loop](docs/media/tower_demo.gif)
@@ -112,7 +117,7 @@ pytest                                                             # ~180 tests,
 $env:ORB_LIVE_OPENAI_KEY = "sk-..."; pytest -m live -s             # optional: one live Astra vision run
 ```
 
-The suite runs real physics (grasps, stacking, missed grasps), real rendering, and the full closed loop: a stand-in vision model misreads a cube by 60 px, the grasp misses, the failure is fed back, and the next round succeeds. The OpenAI client is never called in unit tests.
+The suite runs real physics (grasps, stacking, missed grasps), real rendering, and the full closed loop: a stand-in vision model misreads a cube by 60 px, the grasp misses, the failure is fed back, and the next round succeeds. The OpenAI client is never called in unit tests. GitHub Actions runs the whole suite (physics and offscreen rendering included) on Python 3.11 and 3.12 for every push and pull request.
 
 ## Layout
 
